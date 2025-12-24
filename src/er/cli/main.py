@@ -131,17 +131,77 @@ def analyze(
     if dry_run:
         console.print("\n[yellow]Dry run mode - no APIs will be called.[/yellow]")
         run_state.phase = Phase.COMPLETE
+        manifest["phase"] = run_state.phase.value
+        manifest["completed_at"] = utc_now().isoformat()
+        manifest_path.write_text(json.dumps(manifest, indent=2))
     else:
-        # TODO: Implement actual analysis pipeline
-        console.print(
-            "\n[yellow]Note:[/yellow] Full analysis pipeline not yet implemented."
-        )
-        run_state.phase = Phase.INIT
+        # Run the actual pipeline
+        import asyncio
+        from er.coordinator.pipeline import ResearchPipeline, PipelineConfig
+        from rich.progress import Progress, SpinnerColumn, TextColumn
 
-    # Update manifest with final phase
-    manifest["phase"] = run_state.phase.value
-    manifest["completed_at"] = utc_now().isoformat() if dry_run else None
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        console.print("\n[bold green]Starting 5-stage analysis pipeline...[/bold green]\n")
+
+        pipeline_config = PipelineConfig(
+            max_budget_usd=effective_budget,
+            include_transcripts=True,
+            num_transcript_quarters=4,
+            use_deep_research_discovery=True,
+            use_deep_research_verticals=True,
+            max_parallel_verticals=5,
+        )
+
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(f"Analyzing {ticker}...", total=None)
+
+                pipeline = ResearchPipeline(settings=settings, config=pipeline_config)
+                result = asyncio.run(pipeline.run(ticker))
+
+                progress.update(task, description="[green]Analysis complete!")
+
+            # Generate report
+            report_path = run_output_dir / "report.md"
+            report_content = result.to_report_markdown()
+            report_path.write_text(report_content)
+
+            # Update manifest
+            manifest["phase"] = "complete"
+            manifest["completed_at"] = result.completed_at.isoformat()
+            manifest["total_cost_usd"] = result.total_cost_usd
+            manifest["duration_seconds"] = result.duration_seconds
+            manifest["final_verdict"] = {
+                "investment_view": result.final_verdict.final_investment_view,
+                "conviction": result.final_verdict.final_conviction,
+                "confidence": result.final_verdict.final_confidence,
+            }
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+
+            # Print summary
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]Investment View:[/bold] {result.final_verdict.final_investment_view}\n"
+                    f"[bold]Conviction:[/bold] {result.final_verdict.final_conviction}\n"
+                    f"[bold]Confidence:[/bold] {result.final_verdict.final_confidence:.0%}\n\n"
+                    f"[bold]Thesis:[/bold]\n{result.final_verdict.final_thesis[:300]}...\n\n"
+                    f"[dim]Cost: ${result.total_cost_usd:.2f} | Duration: {result.duration_seconds:.0f}s[/dim]",
+                    title=f"[bold green]{ticker} Research Complete[/bold green]",
+                    border_style="green",
+                )
+            )
+            console.print(f"\n[bold]Report saved to:[/bold] {report_path}")
+
+        except Exception as e:
+            error_console.print(f"\n[red]Error:[/red] {e}")
+            manifest["phase"] = "failed"
+            manifest["error"] = str(e)
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            raise typer.Exit(1)
 
     console.print()
 
