@@ -80,13 +80,14 @@ class OpenAIClient:
     Supports GPT-5.2 family with tool calling and structured output.
     """
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, timeout: float = 1800.0) -> None:
         """Initialize the OpenAI client.
 
         Args:
             api_key: OpenAI API key. If None, uses OPENAI_API_KEY env var.
+            timeout: Request timeout in seconds (default 30 minutes for long syntheses).
         """
-        self._client = AsyncOpenAI(api_key=api_key)
+        self._client = AsyncOpenAI(api_key=api_key, timeout=timeout)
         self._provider = "openai"
 
     @property
@@ -305,10 +306,11 @@ class OpenAIClient:
         """Send a completion request with reasoning effort.
 
         For models that support reasoning (o1, o3, o4, gpt-5.2).
+        Uses the Responses API which supports the reasoning parameter.
 
         Args:
             request: The LLM request.
-            reasoning_effort: One of "low", "medium", "high", "xhigh".
+            reasoning_effort: One of "low", "medium", "high".
 
         Returns:
             LLM response.
@@ -319,10 +321,10 @@ class OpenAIClient:
         start_time = time.monotonic()
 
         try:
-            # Build the request parameters
+            # Build the request parameters for Responses API
             params: dict[str, Any] = {
                 "model": request.model,
-                "messages": request.messages,
+                "input": request.messages,
             }
 
             # Add reasoning effort for supported models
@@ -330,36 +332,198 @@ class OpenAIClient:
                 params["reasoning"] = {"effort": reasoning_effort}
 
             if request.max_tokens:
-                params["max_tokens"] = request.max_tokens
+                params["max_output_tokens"] = request.max_tokens
 
-            if request.response_format:
-                params["response_format"] = request.response_format
-
-            # Make the API call
-            response = await self._client.chat.completions.create(**params)
+            # Make the API call using Responses API
+            response = await self._client.responses.create(**params)
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
 
-            # Extract the response
-            choice = response.choices[0]
-            content = choice.message.content or ""
+            # Extract content using output_text property
+            content = ""
+            if hasattr(response, "output_text") and response.output_text:
+                content = response.output_text
+            else:
+                # Fallback: manually iterate through output
+                if hasattr(response, "output") and response.output:
+                    for item in response.output:
+                        if hasattr(item, "content") and item.content:
+                            for block in item.content:
+                                if hasattr(block, "text"):
+                                    content += block.text
 
-            # Extract reasoning tokens if available
+            # Extract usage
+            input_tokens = 0
+            output_tokens = 0
             reasoning_tokens = 0
-            if hasattr(response.usage, "completion_tokens_details"):
-                details = response.usage.completion_tokens_details
-                if hasattr(details, "reasoning_tokens"):
-                    reasoning_tokens = details.reasoning_tokens or 0
+            if hasattr(response, "usage") and response.usage:
+                input_tokens = getattr(response.usage, "input_tokens", 0)
+                output_tokens = getattr(response.usage, "output_tokens", 0)
+                if hasattr(response.usage, "output_tokens_details"):
+                    details = response.usage.output_tokens_details
+                    reasoning_tokens = getattr(details, "reasoning_tokens", 0) or 0
 
             return LLMResponse(
                 content=content,
-                model=response.model,
+                model=response.model if hasattr(response, "model") else request.model,
                 provider=self._provider,
-                input_tokens=response.usage.prompt_tokens if response.usage else 0,
-                output_tokens=response.usage.completion_tokens if response.usage else 0,
-                finish_reason=choice.finish_reason or "stop",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                finish_reason="stop",
                 latency_ms=latency_ms,
-                metadata={"reasoning_tokens": reasoning_tokens} if reasoning_tokens else None,
+                metadata={"reasoning_tokens": reasoning_tokens, "reasoning_effort": reasoning_effort},
+            )
+
+        except OpenAIRateLimitError as e:
+            retry_after = None
+            if hasattr(e, "response") and e.response:
+                retry_after_header = e.response.headers.get("retry-after")
+                if retry_after_header:
+                    retry_after = float(retry_after_header)
+            raise RateLimitError(str(e), retry_after=retry_after) from e
+
+        except APIError as e:
+            error_msg = str(e)
+            if "authentication" in error_msg.lower():
+                raise AuthenticationError(f"OpenAI authentication failed: {error_msg}") from e
+            if "model" in error_msg.lower() and "not found" in error_msg.lower():
+                raise ModelNotFoundError(f"Model not found: {request.model}") from e
+            raise LLMError(f"OpenAI API error: {error_msg}") from e
+
+    async def complete_with_web_search(
+        self,
+        request: LLMRequest,
+        reasoning_effort: str = "high",
+    ) -> LLMResponse:
+        """Send a completion request with web search enabled.
+
+        Uses the Responses API with web_search_preview tool for GPT-5.2.
+        The model will automatically search the web when needed.
+
+        Note: This can take several minutes as the model performs web searches.
+
+        Args:
+            request: The LLM request.
+            reasoning_effort: Reasoning effort level.
+
+        Returns:
+            LLM response with web search results incorporated.
+
+        Raises:
+            LLMError: If the request fails.
+        """
+        start_time = time.monotonic()
+
+        try:
+            # Use Responses API with web search tool
+            # This is similar to deep_research but synchronous (not background)
+            params: dict[str, Any] = {
+                "model": request.model,
+                "input": request.messages,
+                "tools": [{"type": "web_search"}],
+            }
+
+            # Add reasoning effort for supported models
+            if request.model in REASONING_MODELS:
+                params["reasoning"] = {"effort": reasoning_effort}
+
+            if request.max_tokens:
+                params["max_output_tokens"] = request.max_tokens
+
+            # Calculate approximate prompt size
+            prompt_chars = sum(len(str(m.get("content", ""))) for m in request.messages)
+
+            logger.info(
+                "Starting web search completion (Responses API - may take several minutes)",
+                model=request.model,
+                reasoning_effort=reasoning_effort,
+                prompt_chars=prompt_chars,
+                max_output_tokens=request.max_tokens,
+            )
+            print(f"\n{'='*60}")
+            print(f"OPENAI RESPONSES API CALL")
+            print(f"{'='*60}")
+            print(f"Model: {request.model}")
+            print(f"Reasoning Effort: {reasoning_effort}")
+            print(f"Prompt Size: ~{prompt_chars:,} chars")
+            print(f"Max Output Tokens: {request.max_tokens}")
+            print(f"Tool: web_search")
+            print(f"{'='*60}")
+            print(f"Waiting for response (this typically takes 2-5 minutes)...")
+            print(f"{'='*60}\n")
+
+            # Make the synchronous Responses API call
+            response = await self._client.responses.create(**params)
+
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+
+            print(f"\n{'='*60}")
+            print(f"RESPONSE RECEIVED")
+            print(f"{'='*60}")
+            print(f"Latency: {latency_ms / 1000:.1f} seconds")
+
+            logger.info(
+                "Web search completion finished",
+                model=request.model,
+                latency_seconds=latency_ms / 1000,
+            )
+
+            # Debug: print response structure
+            print(f"\nDEBUG: Response type: {type(response)}")
+            print(f"DEBUG: Response status: {getattr(response, 'status', 'N/A')}")
+            print(f"DEBUG: incomplete_details: {getattr(response, 'incomplete_details', 'N/A')}")
+            print(f"DEBUG: Has output_text: {hasattr(response, 'output_text')}")
+            if hasattr(response, 'output_text'):
+                print(f"DEBUG: output_text value: {repr(response.output_text)[:500]}")
+            print(f"DEBUG: Has output: {hasattr(response, 'output')}")
+            if hasattr(response, 'output') and response.output:
+                print(f"DEBUG: Output count: {len(response.output)}")
+                for idx, item in enumerate(response.output):
+                    print(f"DEBUG: Output[{idx}] type: {type(item).__name__}")
+                    if hasattr(item, 'type'):
+                        print(f"DEBUG: Output[{idx}].type: {item.type}")
+                    if hasattr(item, 'content') and item.content:
+                        print(f"DEBUG: Output[{idx}] content count: {len(item.content)}")
+                        for jdx, block in enumerate(item.content):
+                            print(f"DEBUG: Output[{idx}].content[{jdx}] type: {type(block).__name__}")
+                            if hasattr(block, 'text'):
+                                print(f"DEBUG: Output[{idx}].content[{jdx}].text: {repr(block.text)[:200]}")
+
+            # Extract content using output_text property (simpler and more reliable)
+            content = ""
+            if hasattr(response, "output_text") and response.output_text:
+                content = response.output_text
+            else:
+                # Fallback: manually iterate through output
+                if hasattr(response, "output") and response.output:
+                    for item in response.output:
+                        if hasattr(item, "content") and item.content:
+                            for block in item.content:
+                                if hasattr(block, "text"):
+                                    content += block.text
+
+            print(f"Extracted content length: {len(content)}")
+            if len(content) < 500:
+                print(f"Content preview: {content[:500]}")
+            else:
+                print(f"Content preview (first 500 chars): {content[:500]}...")
+
+            # Extract usage
+            input_tokens = 0
+            output_tokens = 0
+            if hasattr(response, "usage") and response.usage:
+                input_tokens = getattr(response.usage, "input_tokens", 0)
+                output_tokens = getattr(response.usage, "output_tokens", 0)
+
+            return LLMResponse(
+                content=content,
+                model=request.model,
+                provider=self._provider,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                finish_reason="stop",
+                latency_ms=latency_ms,
+                metadata={"web_search_enabled": True},
             )
 
         except OpenAIRateLimitError as e:
@@ -434,7 +598,7 @@ class OpenAIClient:
             })
 
             # Build tools list
-            tools: list[dict[str, Any]] = [{"type": "web_search_preview"}]
+            tools: list[dict[str, Any]] = [{"type": "web_search"}]
             if include_code_interpreter:
                 tools.append({
                     "type": "code_interpreter",

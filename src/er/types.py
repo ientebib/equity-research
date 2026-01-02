@@ -45,6 +45,8 @@ class Phase(str, Enum):
     FETCH_DATA = "fetch_data"
     DISCOVERY = "discovery"
     DECOMPOSE = "decompose"
+    VERTICALS = "verticals"  # Deep research on research groups
+    FACT_CHECK = "fact_check"  # Verification before synthesis
     RESEARCH = "research"
     SYNTHESIZE = "synthesize"
     DELIBERATE = "deliberate"
@@ -438,82 +440,199 @@ class CompanyContext:
             evidence_ids=tuple(data.get("evidence_ids", [])),
         )
 
+    def to_json_payload(self) -> dict[str, Any]:
+        """Convert to clean JSON payload for LLM prompts.
+
+        Returns structured JSON that's unambiguous for the LLM to parse.
+        Includes FULL transcripts, not truncated.
+
+        Returns:
+            Dict ready for json.dumps() in prompts.
+        """
+        import json
+
+        payload: dict[str, Any] = {
+            "symbol": self.symbol,
+            "fetched_at": self.fetched_at.isoformat(),
+        }
+
+        # Profile - clean subset of useful fields
+        if self.profile:
+            payload["profile"] = {
+                "company_name": self.profile.get("companyName"),
+                "sector": self.profile.get("sector"),
+                "industry": self.profile.get("industry"),
+                "description": self.profile.get("description"),
+                "ceo": self.profile.get("ceo"),
+                "employees": self.profile.get("fullTimeEmployees"),
+                "market_cap": self.profile.get("mktCap"),
+                "price": self.profile.get("price"),
+                "beta": self.profile.get("beta"),
+                "exchange": self.profile.get("exchange"),
+                "country": self.profile.get("country"),
+                "website": self.profile.get("website"),
+            }
+
+        # Income statements - full data, most recent first
+        if self.income_statement_annual:
+            payload["income_statement_annual"] = [
+                {
+                    "date": stmt.get("date"),
+                    "period": stmt.get("period"),
+                    "revenue": stmt.get("revenue"),
+                    "cost_of_revenue": stmt.get("costOfRevenue"),
+                    "gross_profit": stmt.get("grossProfit"),
+                    "gross_profit_ratio": stmt.get("grossProfitRatio"),
+                    "operating_expenses": stmt.get("operatingExpenses"),
+                    "operating_income": stmt.get("operatingIncome"),
+                    "operating_income_ratio": stmt.get("operatingIncomeRatio"),
+                    "net_income": stmt.get("netIncome"),
+                    "net_income_ratio": stmt.get("netIncomeRatio"),
+                    "eps": stmt.get("eps"),
+                    "eps_diluted": stmt.get("epsdiluted"),
+                    "ebitda": stmt.get("ebitda"),
+                    "research_and_development": stmt.get("researchAndDevelopmentExpenses"),
+                    "selling_general_admin": stmt.get("sellingGeneralAndAdministrativeExpenses"),
+                }
+                for stmt in self.income_statement_annual[:5]
+            ]
+
+        # Quarterly income - last 8 quarters
+        if self.income_statement_quarterly:
+            payload["income_statement_quarterly"] = [
+                {
+                    "date": stmt.get("date"),
+                    "period": stmt.get("period"),
+                    "revenue": stmt.get("revenue"),
+                    "gross_profit": stmt.get("grossProfit"),
+                    "operating_income": stmt.get("operatingIncome"),
+                    "net_income": stmt.get("netIncome"),
+                    "eps": stmt.get("eps"),
+                }
+                for stmt in self.income_statement_quarterly[:8]
+            ]
+
+        # Balance sheet
+        if self.balance_sheet_annual:
+            payload["balance_sheet_annual"] = [
+                {
+                    "date": bs.get("date"),
+                    "total_assets": bs.get("totalAssets"),
+                    "total_liabilities": bs.get("totalLiabilities"),
+                    "total_equity": bs.get("totalStockholdersEquity"),
+                    "cash_and_equivalents": bs.get("cashAndCashEquivalents"),
+                    "short_term_investments": bs.get("shortTermInvestments"),
+                    "total_debt": bs.get("totalDebt"),
+                    "net_debt": bs.get("netDebt"),
+                }
+                for bs in self.balance_sheet_annual[:3]
+            ]
+
+        # Cash flow
+        if self.cash_flow_annual:
+            payload["cash_flow_annual"] = [
+                {
+                    "date": cf.get("date"),
+                    "operating_cash_flow": cf.get("operatingCashFlow"),
+                    "capital_expenditure": cf.get("capitalExpenditure"),
+                    "free_cash_flow": cf.get("freeCashFlow"),
+                    "dividends_paid": cf.get("dividendsPaid"),
+                    "stock_repurchased": cf.get("commonStockRepurchased"),
+                    "acquisitions": cf.get("acquisitionsNet"),
+                }
+                for cf in self.cash_flow_annual[:3]
+            ]
+
+        # Revenue segmentation - FULL data
+        if self.revenue_product_segmentation:
+            payload["revenue_by_product"] = self.revenue_product_segmentation[:5]
+
+        if self.revenue_geographic_segmentation:
+            payload["revenue_by_geography"] = self.revenue_geographic_segmentation[:5]
+
+        # Transcripts - FULL TEXT, not truncated
+        if self.transcripts:
+            payload["earnings_transcripts"] = [
+                {
+                    "quarter": t.get("quarter"),
+                    "year": t.get("year"),
+                    "date": t.get("date"),
+                    "source": t.get("source", "unknown"),
+                    "full_text": t.get("text") or t.get("content", ""),  # Support both keys
+                }
+                for t in self.transcripts[:4]
+            ]
+
+        # News - headlines with dates
+        if self.news:
+            payload["recent_news"] = [
+                {
+                    "date": n.get("publishedDate", "")[:10],
+                    "title": n.get("title"),
+                    "source": n.get("site"),
+                    "url": n.get("url"),
+                }
+                for n in self.news[:15]
+            ]
+
+        # Analyst data
+        if self.analyst_estimates:
+            payload["analyst_estimates"] = [
+                {
+                    "date": e.get("date"),
+                    "estimated_revenue_avg": e.get("estimatedRevenueAvg"),
+                    "estimated_revenue_low": e.get("estimatedRevenueLow"),
+                    "estimated_revenue_high": e.get("estimatedRevenueHigh"),
+                    "estimated_eps_avg": e.get("estimatedEpsAvg"),
+                    "number_analysts_revenue": e.get("numberAnalystEstimatedRevenue"),
+                    "number_analysts_eps": e.get("numberAnalystsEstimatedEps"),
+                }
+                for e in self.analyst_estimates[:4]
+            ]
+
+        if self.price_target_consensus:
+            payload["price_target_consensus"] = {
+                "target_high": self.price_target_consensus.get("targetHigh"),
+                "target_low": self.price_target_consensus.get("targetLow"),
+                "target_median": self.price_target_consensus.get("targetMedian"),
+                "target_consensus": self.price_target_consensus.get("targetConsensus"),
+            }
+
+        if self.analyst_grades:
+            payload["recent_analyst_grades"] = [
+                {
+                    "date": g.get("date"),
+                    "analyst": g.get("gradingCompany"),
+                    "new_grade": g.get("newGrade"),
+                    "previous_grade": g.get("previousGrade"),
+                }
+                for g in self.analyst_grades[:10]
+            ]
+
+        return payload
+
     def to_prompt_string(self, max_tokens: int | None = None) -> str:
-        """Convert to string format suitable for LLM prompts.
+        """Convert to JSON string for LLM prompts.
 
         Args:
             max_tokens: Optional max token limit (estimated by chars/4).
+                       Note: Transcripts are NOT truncated regardless of this.
 
         Returns:
-            Formatted string with all company context.
+            JSON string with all company context.
         """
-        sections = []
+        import json
 
-        # Profile
-        if self.profile:
-            p = self.profile
-            sections.append(f"""## Company Profile
-- Name: {p.get('companyName', 'N/A')}
-- Ticker: {self.symbol}
-- Sector: {p.get('sector', 'N/A')}
-- Industry: {p.get('industry', 'N/A')}
-- Market Cap: ${p.get('mktCap', 0):,.0f}
-- Description: {p.get('description', 'N/A')[:500]}...""")
+        payload = self.to_json_payload()
+        full_text = json.dumps(payload, indent=2, default=str)
 
-        # Latest financials
-        if self.income_statement_annual:
-            latest = self.income_statement_annual[0]
-            sections.append(f"""## Latest Annual Financials ({latest.get('date', 'N/A')})
-- Revenue: ${latest.get('revenue', 0):,.0f}
-- Gross Profit: ${latest.get('grossProfit', 0):,.0f}
-- Operating Income: ${latest.get('operatingIncome', 0):,.0f}
-- Net Income: ${latest.get('netIncome', 0):,.0f}
-- EPS: ${latest.get('eps', 0):.2f}""")
-
-        # Revenue segments
-        if self.revenue_product_segmentation:
-            seg_lines = []
-            for seg in self.revenue_product_segmentation[:10]:
-                for key, val in seg.items():
-                    if key != "date" and isinstance(val, (int, float)):
-                        seg_lines.append(f"- {key}: ${val:,.0f}")
-            if seg_lines:
-                sections.append(f"""## Revenue by Product/Segment
-{chr(10).join(seg_lines[:15])}""")
-
-        # Transcripts (summaries only)
-        if self.transcripts:
-            transcript_summaries = []
-            for t in self.transcripts[:4]:
-                q = t.get("quarter", "?")
-                y = t.get("year", "?")
-                content = t.get("content", "")[:1000]
-                transcript_summaries.append(f"### Q{q} {y}\n{content}...")
-            sections.append(f"""## Recent Earnings Call Transcripts
-{chr(10).join(transcript_summaries)}""")
-
-        # News headlines
-        if self.news:
-            headlines = [f"- [{n.get('publishedDate', 'N/A')[:10]}] {n.get('title', 'N/A')}" for n in self.news[:10]]
-            sections.append(f"""## Recent News
-{chr(10).join(headlines)}""")
-
-        # Analyst data
-        if self.price_target_consensus:
-            ptc = self.price_target_consensus
-            sections.append(f"""## Analyst Consensus
-- Target High: ${ptc.get('targetHigh', 0):.2f}
-- Target Low: ${ptc.get('targetLow', 0):.2f}
-- Target Median: ${ptc.get('targetMedian', 0):.2f}
-- Target Consensus: ${ptc.get('targetConsensus', 0):.2f}""")
-
-        full_text = "\n\n".join(sections)
-
-        # Truncate if needed
+        # Truncate if needed (but warn - transcripts should not be truncated)
         if max_tokens:
-            max_chars = max_tokens * 4  # Rough estimate
+            max_chars = max_tokens * 4
             if len(full_text) > max_chars:
-                full_text = full_text[:max_chars] + "\n\n[TRUNCATED]"
+                # Don't truncate - just log warning and return full
+                # Truncating JSON mid-way would break parsing
+                pass
 
         return full_text
 
@@ -604,6 +723,37 @@ class DiscoveredThread:
 
 
 @dataclass
+class ResearchGroup:
+    """A group of related verticals for parallel deep research.
+
+    Discovery outputs 2 groups for parallel processing:
+    - Group 1: Core Business (established segments)
+    - Group 2: Growth & Optionality (emerging/strategic bets)
+
+    Groups should be coherent: verticals in a group share business model,
+    valuation method, or research synergies.
+    """
+
+    group_id: str
+    name: str  # e.g., "Advertising & Core Platforms", "Cloud, AI & Strategic Bets"
+    theme: str  # What unifies these verticals
+
+    # Verticals in this group
+    vertical_ids: list[str]  # References to DiscoveredThread.thread_id
+
+    # Research guidance
+    key_questions: list[str]
+
+    # Grouping justification (new fields from fixed prompt)
+    grouping_rationale: str = ""  # Why these verticals belong together
+    shared_context: str = ""  # Context that applies to all verticals in group
+    valuation_approach: str = ""  # "DCF" / "Mixed" / "Primarily option value"
+
+    # Legacy field for backwards compatibility
+    focus: str = ""  # What the deep research agent should focus on
+
+
+@dataclass
 class DiscoveryOutput:
     """Output from the Discovery Agent.
 
@@ -616,18 +766,21 @@ class DiscoveryOutput:
     # All discovered research threads (superset of official)
     research_threads: list[DiscoveredThread]
 
+    # Research groups for parallel deep research (2 groups)
+    research_groups: list[ResearchGroup] = field(default_factory=list)
+
     # Cross-cutting themes (e.g., "AI monetization across all segments")
-    cross_cutting_themes: list[str]
+    cross_cutting_themes: list[str] = field(default_factory=list)
 
     # Strategic optionality candidates (e.g., Waymo)
-    optionality_candidates: list[str]
+    optionality_candidates: list[str] = field(default_factory=list)
 
     # Gaps and uncertainties
-    data_gaps: list[str]
-    conflicting_signals: list[str]
+    data_gaps: list[str] = field(default_factory=list)
+    conflicting_signals: list[str] = field(default_factory=list)
 
     # Evidence
-    evidence_ids: list[str]
+    evidence_ids: list[str] = field(default_factory=list)
 
     # Discovery metadata
     discovery_timestamp: datetime = field(default_factory=utc_now)
@@ -643,57 +796,56 @@ class DiscoveryOutput:
             key=lambda t: t.priority,
         )
 
+    def get_threads_for_group(self, group: ResearchGroup) -> list[DiscoveredThread]:
+        """Get all threads belonging to a research group."""
+        return [t for t in self.research_threads if t.thread_id in group.vertical_ids]
+
+    def get_group_by_name(self, name: str) -> ResearchGroup | None:
+        """Get a research group by name."""
+        for group in self.research_groups:
+            return group if group.name == name else None
+        return None
+
 
 # ============== Stage 3: Vertical Analysis Output ==============
-
-@dataclass
-class ThesisCase:
-    """Bull or bear case for a vertical."""
-
-    narrative: str
-    key_assumptions: list[str]
-    catalysts: list[str]
-    probability: float  # 0.0 to 1.0
-    evidence_ids: list[str]
-
-
-@dataclass
-class Risk:
-    """A risk identified in analysis."""
-
-    description: str
-    probability: str  # "low", "medium", "high"
-    impact: str  # "low", "medium", "high"
-    mitigation: str | None = None
-    evidence_ids: list[str] = field(default_factory=list)
-
 
 @dataclass
 class VerticalAnalysis:
     """Output from a Vertical Analyst agent.
 
     Deep analysis of a single research thread/vertical.
+    Contains prose from Deep Research.
     """
 
     thread_id: str
     vertical_name: str
+    business_understanding: str  # The prose research report
+    evidence_ids: list[str] = field(default_factory=list)
+    overall_confidence: float = 0.0
 
-    # Analysis content
-    business_understanding: str
-    competitive_position: str
-    growth_drivers: list[str]
-    key_risks: list[Risk]
 
-    # Investment cases
-    bull_case: ThesisCase
-    bear_case: ThesisCase
+@dataclass
+class GroupResearchOutput:
+    """Output from Deep Research for a group of verticals.
 
-    # Confidence
-    overall_confidence: float  # 0.0 to 1.0
-    confidence_drivers: list[str]
+    Contains analyses for all verticals in a research group,
+    plus cross-vertical insights specific to that group.
+    """
 
-    # Gaps
-    unanswered_questions: list[str]
+    group_id: str
+    group_name: str
+
+    # Individual vertical analyses within this group
+    vertical_analyses: list[VerticalAnalysis]
+
+    # Cross-vertical insights for this group
+    synergies: str  # How verticals in this group interact
+    shared_risks: str  # Risks affecting multiple verticals
+    group_thesis: str  # Overall view on this research group
+
+    # Research quality
+    web_searches_performed: list[dict[str, str]]  # query -> finding
+    overall_confidence: float
     data_gaps: list[str]
 
     # Evidence
@@ -703,70 +855,19 @@ class VerticalAnalysis:
 # ============== Stage 4: Synthesis Output ==============
 
 @dataclass
-class Scenario:
-    """A valuation scenario (bull/base/bear)."""
-
-    name: str  # "bull", "base", "bear"
-    probability: float
-    narrative: str
-    key_assumptions: list[str]
-
-
-@dataclass
-class KeyDebate:
-    """A key debate point in the investment thesis."""
-
-    topic: str
-    bull_view: str
-    bear_view: str
-    our_view: str
-    resolution_catalyst: str | None = None
-    evidence_supporting_bull: list[str] = field(default_factory=list)
-    evidence_supporting_bear: list[str] = field(default_factory=list)
-
-
-@dataclass
-class RiskFactor:
-    """A risk factor for the investment."""
-
-    description: str
-    probability: str  # "low", "medium", "high"
-    impact: str  # "low", "medium", "high"
-    category: str  # "competitive", "regulatory", "execution", "macro", etc.
-    evidence_ids: list[str] = field(default_factory=list)
-
-
-@dataclass
 class SynthesisOutput:
     """Output from a Synthesizer agent.
 
-    Combines all vertical analyses into unified investment thesis.
-    V1: No DCF, qualitative analysis only.
+    Contains the full prose equity research report.
     """
 
-    # Investment view
-    investment_view: str  # "BUY", "HOLD", "SELL"
-    conviction: str  # "high", "medium", "low"
-    thesis_summary: str
-
-    # Scenarios (qualitative)
-    scenarios: dict[str, Scenario]  # "bull", "base", "bear"
-
-    # Key debates
-    key_debates: list[KeyDebate]
-
-    # Risks
-    risk_factors: list[RiskFactor]
-
-    # Confidence
-    overall_confidence: float
-    evidence_gaps: list[str]
-
-    # Evidence
-    evidence_ids: list[str]
-
-    # Metadata
-    synthesizer_model: str  # "claude" or "gpt"
+    full_report: str = ""  # The complete equity research report (markdown prose)
+    investment_view: str = "HOLD"  # "BUY", "HOLD", "SELL"
+    conviction: str = "medium"  # "high", "medium", "low"
+    overall_confidence: float = 0.5  # 0.0 to 1.0
+    thesis_summary: str = ""  # 1-2 sentence summary
+    synthesizer_model: str = ""  # "claude" or "gpt"
+    evidence_ids: list[str] = field(default_factory=list)
     synthesis_timestamp: datetime = field(default_factory=utc_now)
 
 
@@ -779,38 +880,171 @@ class Inconsistency:
     topic: str
     claude_view: str
     gpt_view: str
-    severity: str  # "minor", "moderate", "major"
     resolution: str
+    winner: str = "neither"  # "claude", "gpt", or "neither"
+    ground_truth_says: str = ""
+
+
+@dataclass
+class Challenge:
+    """A challenge issued by the Judge requiring a response.
+
+    Challenges are routed to appropriate agents for resolution.
+    """
+
+    challenge_id: str
+    target: str  # "discovery", "research_group_1", "research_group_2", "synthesis"
+    severity: str  # "critical", "high", "medium"
+    issue: str  # What's wrong
+    question: str  # Specific question that must be answered
+    required_evidence: str  # What evidence would resolve this
+    impact_if_unresolved: str  # Why this matters
+
+
+@dataclass
+class Agreement:
+    """An agreement between Claude and GPT syntheses."""
+
+    topic: str
+    both_say: str
+    confidence: str  # "high", "medium", "low"
+
+
+@dataclass
+class Disagreement:
+    """A disagreement between Claude and GPT syntheses."""
+
+    topic: str
+    claude_says: str
+    gpt_says: str
+    ground_truth_says: str
+    who_is_right: str  # "claude", "gpt", "neither", "unclear"
+    resolution: str
+
+
+@dataclass
+class DiscoveryCompleteness:
+    """Assessment of discovery completeness."""
+
+    is_complete: bool
+    missing_verticals: list[str]
+    reasoning: str
+
+
+@dataclass
+class InsightToIncorporate:
+    """An insight from the losing synthesis to incorporate."""
+
+    section: str  # Which section of the other report
+    what_to_incorporate: str  # The quoted text to add
+    why: str  # Why this improves the report
+    how_to_integrate: str  # Specific suggestion
+
+
+@dataclass
+class ErrorToFix:
+    """An error in the chosen synthesis to fix."""
+
+    location: str  # Where in the report
+    error: str  # What's wrong
+    correction: str  # How to fix it
+
+
+@dataclass
+class GapToAddress:
+    """A gap in the chosen synthesis to address."""
+
+    missing: str  # What's missing
+    why_important: str  # Why it matters
+    suggestion: str  # How to address it
+
+
+@dataclass
+class EditorialFeedback:
+    """Editorial feedback from Judge to Synthesizer.
+
+    The Judge picks a winner and provides specific, actionable feedback
+    for that Synthesizer to revise their report.
+    """
+
+    # Which synthesis was chosen
+    preferred_synthesis: str  # "claude" or "gpt"
+    preference_reasoning: str
+
+    # Quality assessment
+    claude_score: float
+    gpt_score: float
+    key_differentiators: list[str]
+
+    # What to incorporate from the losing report
+    incorporate_from_other: list[InsightToIncorporate]
+
+    # Errors to fix in the chosen report
+    errors_to_fix: list[ErrorToFix]
+
+    # Gaps to address
+    gaps_to_address: list[GapToAddress]
+
+    # Detailed revision instructions (3-5 paragraphs)
+    revision_instructions: str
+
+    # Confidence adjustment
+    current_confidence: float
+    recommended_confidence: float
+    confidence_reasoning: str
+
+    # Meta assessment
+    analysis_quality: str  # "high", "medium", "low"
+    key_strengths: list[str]
+    key_weaknesses: list[str]
 
 
 @dataclass
 class JudgeVerdict:
     """Final verdict from the Judge agent.
 
-    Compares Claude and GPT syntheses, produces final unified output.
+    Now supports deliberation loop with status: "accept" or "challenge".
     """
 
-    # Comparison results
-    agreements: list[str]
-    inconsistencies: list[Inconsistency]
+    # Deliberation status
+    status: str  # "accept" or "challenge"
+    challenge_round: int = 1
 
-    # Preference
-    preferred_synthesis: str  # "claude", "gpt", or "merged"
-    preference_reasoning: str
+    # Comparison results (both accept and challenge)
+    agreements: list[Agreement] = field(default_factory=list)
+    disagreements: list[Disagreement] = field(default_factory=list)
 
-    # Final output
-    final_investment_view: str  # "BUY", "HOLD", "SELL"
-    final_conviction: str  # "high", "medium", "low"
-    final_thesis: str
-    final_confidence: float
+    # Challenge-specific (status == "challenge")
+    challenges: list[Challenge] = field(default_factory=list)
+    discovery_completeness: DiscoveryCompleteness | None = None
+    preliminary_lean: dict[str, Any] | None = None  # direction, confidence, blocker
 
-    # Key conclusions
-    key_risks: list[str]
-    key_catalysts: list[str]
-    key_uncertainties: list[str]
+    # Accept-specific (status == "accept")
+    resolution_of_disagreements: list[dict[str, str]] = field(default_factory=list)
+    preferred_synthesis: str = "merged"  # "claude", "gpt", or "merged"
+    preference_reasoning: str = ""
+
+    # Final output (status == "accept")
+    final_investment_view: str = "HOLD"  # "BUY", "HOLD", "SELL"
+    final_conviction: str = "medium"  # "high", "medium", "low"
+    final_thesis: str = ""
+    final_confidence: float = 0.5
+
+    # Scenarios (status == "accept")
+    scenarios: dict[str, Scenario] = field(default_factory=dict)
+
+    # Key conclusions (status == "accept")
+    key_risks: list[dict[str, str]] = field(default_factory=list)
+    key_catalysts: list[str] = field(default_factory=list)
+    evidence_gaps: list[str] = field(default_factory=list)
+    confidence_reasoning: str = ""
+
+    # Legacy fields for backwards compatibility
+    inconsistencies: list[Inconsistency] = field(default_factory=list)
+    key_uncertainties: list[str] = field(default_factory=list)
 
     # Evidence
-    evidence_ids: list[str]
+    evidence_ids: list[str] = field(default_factory=list)
 
     # Metadata
     judge_timestamp: datetime = field(default_factory=utc_now)

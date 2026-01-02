@@ -538,7 +538,26 @@ class GeminiClient:
                     # Extract the final output
                     content = ""
                     if interaction.outputs:
-                        content = interaction.outputs[-1].text or ""
+                        # Log all outputs for debugging
+                        logger.debug(
+                            "Deep Research outputs",
+                            interaction_id=interaction.id,
+                            output_count=len(interaction.outputs),
+                            output_types=[type(o).__name__ for o in interaction.outputs],
+                        )
+                        # Get the last text output
+                        for output in reversed(interaction.outputs):
+                            if hasattr(output, 'text') and output.text:
+                                content = output.text
+                                break
+
+                        # If no text found, log what we got
+                        if not content:
+                            logger.warning(
+                                "Deep Research completed but no text output found",
+                                interaction_id=interaction.id,
+                                outputs=str(interaction.outputs)[:500],
+                            )
 
                     logger.info(
                         "Deep Research completed",

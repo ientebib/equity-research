@@ -1,8 +1,21 @@
 """
-Judge Agent (Stage 5).
+Judge Agent (Stage 5) - Editorial Review with Feedback Loop.
 
-Compares Claude and GPT syntheses, identifies inconsistencies,
-and produces the final unified equity research report.
+The Judge compares both synthesis reports (Claude and GPT), identifies:
+1. Which synthesis is stronger
+2. What's better in the other synthesis that should be incorporated
+3. What errors or gaps need fixing
+
+Instead of writing the final report itself, the Judge sends feedback
+to the chosen Synthesizer, which revises its report. This preserves
+the Synthesizer's chain of reasoning while incorporating the best
+of both worlds.
+
+Flow:
+1. Judge reviews both full reports
+2. Judge picks preferred synthesis + generates revision feedback
+3. Feedback sent back to Synthesizer
+4. Synthesizer produces revised final report
 
 Model: Claude Opus 4.5 (extended thinking, budget_tokens: 20000)
 """
@@ -18,137 +31,227 @@ from er.llm.anthropic_client import AnthropicClient
 from er.llm.base import LLMRequest
 from er.types import (
     CompanyContext,
-    Inconsistency,
-    JudgeVerdict,
+    EditorialFeedback,
+    ErrorToFix,
+    GapToAddress,
+    InsightToIncorporate,
     Phase,
     RunState,
     SynthesisOutput,
 )
 
 
-# Judge prompt template
-JUDGE_PROMPT = """You are the Final Judge for an institutional equity research system.
+# Judge prompt template - Editorial Review with Feedback
+JUDGE_PROMPT = """You are the Editorial Judge for an institutional equity research system.
 
-TODAY'S DATE: {date}
-COMPANY: {ticker} ({company_name})
+## TODAY'S DATE: {date}
 
-## Your Role
-You have received TWO independent synthesis reports from different AI models:
-1. Claude Opus 4.5 (extended thinking)
-2. GPT-5.2 (high reasoning effort)
+## YOUR ROLE
 
-Your job is to:
-1. Compare both syntheses
-2. Identify agreements and inconsistencies
-3. Verify claims against the ground truth CompanyContext
-4. Produce the FINAL unified investment thesis
+You have received TWO full equity research reports (from Claude and GPT) analyzing the same company.
+Your job is NOT to write the final report yourself. Instead, you will:
 
-## CompanyContext (Ground Truth)
-{company_context}
+1. Read both full reports carefully
+2. Decide which report is STRONGER overall
+3. Identify what the OTHER report does BETTER that should be incorporated
+4. Identify any ERRORS or GAPS in the chosen report
+5. Generate SPECIFIC FEEDBACK for the chosen Synthesizer to revise its report
 
-## Claude Synthesis
-Investment View: {claude_view} (Conviction: {claude_conviction})
-Thesis: {claude_thesis}
+The final output will be the SYNTHESIZER'S revised report, not yours.
+You are an editor, not an author.
 
-Scenarios:
-{claude_scenarios}
+## CLAUDE SYNTHESIS REPORT
 
-Key Debates:
-{claude_debates}
+{claude_synthesis}
 
-Risk Factors:
-{claude_risks}
+## GPT SYNTHESIS REPORT
 
-Overall Confidence: {claude_confidence:.0%}
-Evidence Gaps: {claude_gaps}
+{gpt_synthesis}
 
-## GPT Synthesis
-Investment View: {gpt_view} (Conviction: {gpt_conviction})
-Thesis: {gpt_thesis}
+## YOUR ANALYSIS PROCESS
 
-Scenarios:
-{gpt_scenarios}
+### Step 1: Overall Assessment
+Read both reports in full. Consider:
+- Depth of analysis
+- Quality of reasoning
+- Use of evidence
+- Clarity of investment thesis
+- Completeness of risk assessment
+- Internal consistency
 
-Key Debates:
-{gpt_debates}
+### Step 2: Pick the Stronger Report
+Which report is better overall? This will be the BASE for the final report.
+The chosen Synthesizer will revise it based on your feedback.
 
-Risk Factors:
-{gpt_risks}
+### Step 3: Identify What the Other Report Does Better
+The "losing" report may still have strengths worth incorporating:
+- Better analysis of a specific segment?
+- Identified a risk the other missed?
+- Clearer explanation of something?
+- More specific metrics or evidence?
 
-Overall Confidence: {gpt_confidence:.0%}
-Evidence Gaps: {gpt_gaps}
+### Step 4: Identify Errors and Gaps
+In the CHOSEN report, what needs fixing?
+- Factual errors
+- Logical inconsistencies
+- Missing considerations
+- Overconfident claims
+- Unclear reasoning
 
-## Your Analysis Tasks
+### Step 5: Generate Revision Feedback
+Write specific, actionable feedback for the Synthesizer.
+This is your main output - make it detailed and useful.
 
-### 1. Compare Syntheses
-- Where do they AGREE? List specific points of agreement.
-- Where do they DISAGREE? For each disagreement:
-  - What does Claude say?
-  - What does GPT say?
-  - Who is right based on the evidence?
-
-### 2. Fact Check Against CompanyContext
-- Are there any claims that contradict the financial data?
-- Are there any unsupported claims?
-- Note: Both models could be wrong on the same point.
-
-### 3. Resolve Conflicts
-For each inconsistency:
-- Evaluate the evidence for each position
-- Determine which view is better supported
-- If neither is well-supported, flag as uncertainty
-
-### 4. Produce Final Verdict
-- Final investment view with conviction
-- Unified thesis statement
-- Key risks, catalysts, and uncertainties
-
-## Output Requirements
-
-You MUST output valid JSON with this exact structure:
+## OUTPUT FORMAT
 
 ```json
 {{
-  "agreements": ["Point of agreement 1", "Point of agreement 2"],
-  "inconsistencies": [
+  "preferred_synthesis": "claude|gpt",
+  "preference_reasoning": "2-3 sentences explaining why this report is stronger overall",
+
+  "overall_quality_assessment": {{
+    "claude_score": 0.0,
+    "gpt_score": 0.0,
+    "key_differentiators": ["What made the winner better"]
+  }},
+
+  "incorporate_from_other": [
     {{
-      "topic": "The topic of disagreement",
-      "claude_view": "What Claude said",
-      "gpt_view": "What GPT said",
-      "resolution": "Your resolution with reasoning",
-      "winner": "claude|gpt|neither"
+      "section": "Which section of the other report has something better",
+      "what_to_incorporate": "QUOTE the specific passage or insight verbatim. Include the actual text so the Synthesizer can incorporate it directly without losing nuance.",
+      "why": "Why this improves the report",
+      "how_to_integrate": "Specific suggestion for where and how to add this"
     }}
   ],
-  "preferred_synthesis": "claude|gpt|merged",
-  "preference_reasoning": "Why you prefer this synthesis",
-  "final_investment_view": "BUY|HOLD|SELL",
-  "final_conviction": "high|medium|low",
-  "final_thesis": "Your unified thesis statement (3-4 sentences)",
-  "final_confidence": 0.7,
-  "key_risks": ["Top risk 1", "Top risk 2", "Top risk 3"],
-  "key_catalysts": ["Catalyst 1", "Catalyst 2"],
-  "key_uncertainties": ["Uncertainty 1", "Uncertainty 2"]
+
+  "errors_to_fix": [
+    {{
+      "location": "Where in the report (section name or quote)",
+      "error": "What's wrong",
+      "correction": "What it should say or how to fix it"
+    }}
+  ],
+
+  "gaps_to_address": [
+    {{
+      "missing": "What's missing from the report",
+      "why_important": "Why this matters for the investment thesis",
+      "suggestion": "How to address it"
+    }}
+  ],
+
+  "revision_instructions": "
+    Detailed instructions for the Synthesizer to revise its report.
+    Be specific:
+    - 'In the Executive Summary, add...'
+    - 'The Cloud segment analysis should incorporate...'
+    - 'Strengthen the bear case by...'
+    - 'The risk section is missing...'
+
+    This should be 3-5 paragraphs of actionable feedback.
+  ",
+
+  "confidence_adjustment": {{
+    "current_confidence": 0.0,
+    "recommended_confidence": 0.0,
+    "reasoning": "Why adjust confidence (or why keep it)"
+  }},
+
+  "meta": {{
+    "analysis_quality": "high|medium|low",
+    "key_strengths": ["What both reports did well"],
+    "key_weaknesses": ["What both reports could improve"]
+  }}
 }}
 ```
 
-## Hard Rules
+## HARD RULES
 
-1. DO NOT blindly average or merge - think critically about each conflict
-2. If both syntheses agree on something that contradicts CompanyContext, call it out
-3. Final confidence should reflect unresolved uncertainties
-4. Key risks should be specific and actionable
-5. If you can't confidently resolve a conflict, it becomes a "key_uncertainty"
-"""
+1. **YOU ARE AN EDITOR, NOT AN AUTHOR** - Your job is to guide the Synthesizer, not write the final report yourself.
+
+2. **QUOTE, DON'T SUMMARIZE** - When extracting insights from the other report, QUOTE the actual text verbatim.
+   The Synthesizer needs the exact language to incorporate the insight without losing nuance.
+   BAD: "GPT had a good point about regulatory risk"
+   GOOD: "GPT wrote: 'The DOJ antitrust case represents an underappreciated tail risk. If the court mandates structural remedies, the advertising business could face...' - incorporate this in your Risk Assessment section."
+
+3. **BE SPECIFIC** - Not "improve the risk section" but "add the regulatory risk analysis from GPT's report (quoted above) after your current risk #3."
+
+4. **TRANSFER BRILLIANCE** - Both reports may have unique brilliant insights. Your job is to ensure the winner's report includes the best of BOTH. Don't let good insights die with the losing report.
+
+5. **PRIORITIZE** - Focus on what matters most. 3-5 key improvements, not 50 minor edits.
+
+6. **PRESERVE THE THESIS** - Don't ask the Synthesizer to flip their investment view unless there's a critical error. The Synthesizer developed their thesis through reasoning - respect that.
+
+7. **ACKNOWLEDGE UNCERTAINTY** - If evidence is thin, recommend lowering confidence rather than fabricating certainty.
+
+8. **THINK ADVERSARIALLY** - What would a skeptic challenge? Ensure the final report addresses likely pushback.
+
+Output ONLY the JSON. No preamble."""
+
+
+# Revision prompt for the Synthesizer to incorporate Judge feedback
+REVISION_PROMPT = """You are revising your equity research report based on editorial feedback.
+
+## TODAY'S DATE: {date}
+## COMPANY: {ticker}
+
+## YOUR ORIGINAL REPORT
+
+{original_report}
+
+## EDITORIAL FEEDBACK FROM JUDGE
+
+The Judge reviewed both your report and an alternative synthesis. They have selected YOUR report
+as the stronger one, but have provided feedback to make it even better.
+
+### What to incorporate from the other report:
+{incorporate_from_other}
+
+### Errors to fix:
+{errors_to_fix}
+
+### Gaps to address:
+{gaps_to_address}
+
+### Detailed revision instructions:
+{revision_instructions}
+
+### Confidence adjustment:
+{confidence_adjustment}
+
+## YOUR TASK
+
+Revise your report incorporating the Judge's feedback. You should:
+
+1. **PRESERVE your core thesis and reasoning** - The Judge selected your report because your analysis was strong. Don't abandon your reasoning.
+
+2. **INCORPORATE the specific improvements** - Add the insights, fix the errors, address the gaps.
+
+3. **MAINTAIN your voice and structure** - This is still YOUR report. Don't rewrite it from scratch.
+
+4. **UPDATE the JSON metadata** at the end if the feedback affects investment view, conviction, or confidence.
+
+## OUTPUT
+
+Output your REVISED full report in the same format as before:
+- Full prose research report (main content)
+- JSON metadata block at the end
+
+The report should be improved but recognizably yours."""
 
 
 class JudgeAgent(Agent):
-    """Stage 5: Final Judge.
+    """Stage 5: Editorial Judge with Feedback Loop.
 
     Responsible for:
-    1. Comparing Claude and GPT syntheses
-    2. Identifying inconsistencies and resolving conflicts
-    3. Fact-checking against CompanyContext
-    4. Producing the final unified investment thesis
+    1. Comparing Claude and GPT synthesis REPORTS (full prose)
+    2. Selecting the stronger report
+    3. Identifying improvements from the other report to incorporate
+    4. Generating specific revision feedback
+    5. Sending feedback back to the chosen Synthesizer
+
+    The final output is the SYNTHESIZER'S revised report, not the Judge's.
+    This preserves the chain of reasoning while getting best of both worlds.
 
     Uses Claude Opus 4.5 with extended thinking (budget_tokens: 20000).
     """
@@ -168,7 +271,7 @@ class JudgeAgent(Agent):
 
     @property
     def role(self) -> str:
-        return "Compare syntheses and produce final unified verdict"
+        return "Editorial review of syntheses with feedback for revision"
 
     async def _get_anthropic_client(self) -> AnthropicClient:
         """Get or create Anthropic client."""
@@ -185,67 +288,58 @@ class JudgeAgent(Agent):
         claude_synthesis: SynthesisOutput,
         gpt_synthesis: SynthesisOutput,
         **kwargs: Any,
-    ) -> JudgeVerdict:
-        """Execute Stage 5: Final Judgment.
+    ) -> EditorialFeedback:
+        """Execute Stage 5: Editorial Review.
+
+        Compares both synthesis reports and generates editorial feedback
+        for the winning Synthesizer to revise their report.
 
         Args:
             run_state: Current run state.
             company_context: CompanyContext from Stage 1.
-            claude_synthesis: Synthesis from Claude (Stage 4).
-            gpt_synthesis: Synthesis from GPT (Stage 4).
+            claude_synthesis: Synthesis from Claude (Stage 4) with full_report.
+            gpt_synthesis: Synthesis from GPT (Stage 4) with full_report.
 
         Returns:
-            JudgeVerdict with final unified thesis.
+            EditorialFeedback with revision instructions.
         """
         self.log_info(
-            "Starting final judgment",
+            "Starting editorial review",
             ticker=run_state.ticker,
             claude_view=claude_synthesis.investment_view,
+            claude_report_len=len(claude_synthesis.full_report),
             gpt_view=gpt_synthesis.investment_view,
+            gpt_report_len=len(gpt_synthesis.full_report),
         )
 
-        run_state.phase = Phase.JUDGE
+        run_state.phase = Phase.DELIBERATE
 
-        # Build the prompt
+        # Build the prompt with FULL REPORTS (not JSON summaries)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         prompt = JUDGE_PROMPT.format(
             date=today,
-            ticker=company_context.symbol,
-            company_name=company_context.company_name,
-            company_context=company_context.to_prompt_string(max_tokens=8000),
-            # Claude synthesis
-            claude_view=claude_synthesis.investment_view,
-            claude_conviction=claude_synthesis.conviction,
-            claude_thesis=claude_synthesis.thesis_summary,
-            claude_scenarios=self._format_scenarios(claude_synthesis.scenarios),
-            claude_debates=self._format_debates(claude_synthesis.key_debates),
-            claude_risks=self._format_risk_factors(claude_synthesis.risk_factors),
-            claude_confidence=claude_synthesis.overall_confidence,
-            claude_gaps=", ".join(claude_synthesis.evidence_gaps),
-            # GPT synthesis
-            gpt_view=gpt_synthesis.investment_view,
-            gpt_conviction=gpt_synthesis.conviction,
-            gpt_thesis=gpt_synthesis.thesis_summary,
-            gpt_scenarios=self._format_scenarios(gpt_synthesis.scenarios),
-            gpt_debates=self._format_debates(gpt_synthesis.key_debates),
-            gpt_risks=self._format_risk_factors(gpt_synthesis.risk_factors),
-            gpt_confidence=gpt_synthesis.overall_confidence,
-            gpt_gaps=", ".join(gpt_synthesis.evidence_gaps),
+            claude_synthesis=claude_synthesis.full_report,
+            gpt_synthesis=gpt_synthesis.full_report,
         )
 
         # Get Anthropic client
         anthropic = await self._get_anthropic_client()
 
-        # Run judgment with extended thinking (max budget)
+        # Run editorial review with extended thinking
         request = LLMRequest(
             messages=[
-                {"role": "system", "content": "You are a senior equity research analyst acting as the final judge between two independent analyses."},
+                {
+                    "role": "system",
+                    "content": "You are a senior equity research editor reviewing two synthesis reports. Your job is to pick the stronger one and provide specific feedback for revision.",
+                },
                 {"role": "user", "content": prompt},
             ],
             model="claude-opus-4-5-20251101",
-            max_tokens=24000,
+            max_tokens=16000,  # Feedback doesn't need to be as long as the reports
         )
+
+        self.log_info("Calling Claude for editorial review...")
 
         response = await anthropic.complete_with_thinking(
             request,
@@ -260,71 +354,42 @@ class JudgeAgent(Agent):
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
                 agent=self.name,
-                phase="judge",
+                phase="judge_editorial",
             )
 
-        # Parse the response
-        verdict = self._parse_response(
-            response.content,
-            company_context.evidence_ids,
-        )
-
-        # Update run state
-        run_state.final_verdict = {
-            "investment_view": verdict.final_investment_view,
-            "conviction": verdict.final_conviction,
-            "confidence": verdict.final_confidence,
-            "preferred_synthesis": verdict.preferred_synthesis,
-            "inconsistency_count": len(verdict.inconsistencies),
-        }
-
         self.log_info(
-            "Completed final judgment",
-            ticker=run_state.ticker,
-            final_view=verdict.final_investment_view,
-            final_conviction=verdict.final_conviction,
-            final_confidence=verdict.final_confidence,
-            preferred=verdict.preferred_synthesis,
-            inconsistencies=len(verdict.inconsistencies),
+            "Received editorial response",
+            response_len=len(response.content),
             thinking_tokens=response.metadata.get("thinking_tokens") if response.metadata else 0,
         )
 
-        return verdict
+        # Parse the editorial feedback
+        feedback = self._parse_editorial_feedback(response.content)
 
-    def _format_scenarios(self, scenarios: dict[str, Any]) -> str:
-        """Format scenarios for the prompt."""
-        lines = []
-        for name in ["bull", "base", "bear"]:
-            if name in scenarios:
-                s = scenarios[name]
-                lines.append(f"- {name.title()} ({s.probability:.0%}): {s.narrative}")
-        return "\n".join(lines) if lines else "No scenarios provided"
+        # Update run state
+        run_state.final_verdict = {
+            "preferred_synthesis": feedback.preferred_synthesis,
+            "claude_score": feedback.claude_score,
+            "gpt_score": feedback.gpt_score,
+            "insights_to_incorporate": len(feedback.incorporate_from_other),
+            "errors_to_fix": len(feedback.errors_to_fix),
+            "gaps_to_address": len(feedback.gaps_to_address),
+        }
 
-    def _format_debates(self, debates: list[Any]) -> str:
-        """Format key debates for the prompt."""
-        if not debates:
-            return "No debates identified"
-        lines = []
-        for d in debates:
-            lines.append(f"- {d.topic}: Bull says '{d.bull_view[:100]}...' vs Bear says '{d.bear_view[:100]}...'")
-        return "\n".join(lines)
+        self.log_info(
+            "Completed editorial review",
+            ticker=run_state.ticker,
+            preferred=feedback.preferred_synthesis,
+            claude_score=feedback.claude_score,
+            gpt_score=feedback.gpt_score,
+            insights_count=len(feedback.incorporate_from_other),
+            errors_count=len(feedback.errors_to_fix),
+        )
 
-    def _format_risk_factors(self, risks: list[Any]) -> str:
-        """Format risk factors for the prompt."""
-        if not risks:
-            return "No risks identified"
-        lines = []
-        for r in risks:
-            lines.append(f"- {r.name} ({r.probability} prob, {r.impact} impact): {r.description[:100]}...")
-        return "\n".join(lines)
+        return feedback
 
-    def _parse_response(
-        self,
-        content: str,
-        base_evidence_ids: tuple[str, ...],
-    ) -> JudgeVerdict:
-        """Parse the LLM response into JudgeVerdict."""
-        # Try to extract JSON from the response
+    def _parse_editorial_feedback(self, content: str) -> EditorialFeedback:
+        """Parse the LLM response into EditorialFeedback."""
         try:
             # Find JSON block
             if "```json" in content:
@@ -344,49 +409,85 @@ class JudgeAgent(Agent):
             data = json.loads(json_str)
 
         except (json.JSONDecodeError, ValueError) as e:
-            self.log_warning(f"Failed to parse JSON response: {e}")
-            # Return minimal output with error
-            return JudgeVerdict(
-                agreements=[],
-                inconsistencies=[],
-                preferred_synthesis="neither",
-                preference_reasoning="Failed to parse judge response",
-                final_investment_view="HOLD",
-                final_conviction="low",
-                final_thesis="Failed to parse judge response",
-                final_confidence=0.0,
-                key_risks=["Parse error"],
-                key_catalysts=[],
-                key_uncertainties=["Failed to complete judgment"],
-                evidence_ids=list(base_evidence_ids),
+            self.log_warning(f"Failed to parse editorial feedback JSON: {e}")
+            # Return minimal feedback
+            return EditorialFeedback(
+                preferred_synthesis="claude",
+                preference_reasoning="Failed to parse response - defaulting to Claude",
+                claude_score=0.5,
+                gpt_score=0.5,
+                key_differentiators=["Parse error"],
+                incorporate_from_other=[],
+                errors_to_fix=[],
+                gaps_to_address=[],
+                revision_instructions="Unable to parse editorial feedback. Review reports manually.",
+                current_confidence=0.5,
+                recommended_confidence=0.5,
+                confidence_reasoning="Parse error",
+                analysis_quality="low",
+                key_strengths=[],
+                key_weaknesses=["Failed to complete editorial review"],
             )
 
-        # Parse inconsistencies
-        inconsistencies = []
-        for inc in data.get("inconsistencies", []):
-            inconsistencies.append(
-                Inconsistency(
-                    topic=inc.get("topic", ""),
-                    claude_view=inc.get("claude_view", ""),
-                    gpt_view=inc.get("gpt_view", ""),
-                    resolution=inc.get("resolution", ""),
-                    winner=inc.get("winner", "neither"),
+        # Parse quality assessment
+        quality = data.get("overall_quality_assessment", {})
+
+        # Parse insights to incorporate
+        incorporate = []
+        for item in data.get("incorporate_from_other", []):
+            incorporate.append(
+                InsightToIncorporate(
+                    section=item.get("section", ""),
+                    what_to_incorporate=item.get("what_to_incorporate", ""),
+                    why=item.get("why", ""),
+                    how_to_integrate=item.get("how_to_integrate", ""),
                 )
             )
 
-        return JudgeVerdict(
-            agreements=data.get("agreements", []),
-            inconsistencies=inconsistencies,
-            preferred_synthesis=data.get("preferred_synthesis", "merged"),
+        # Parse errors to fix
+        errors = []
+        for item in data.get("errors_to_fix", []):
+            errors.append(
+                ErrorToFix(
+                    location=item.get("location", ""),
+                    error=item.get("error", ""),
+                    correction=item.get("correction", ""),
+                )
+            )
+
+        # Parse gaps to address
+        gaps = []
+        for item in data.get("gaps_to_address", []):
+            gaps.append(
+                GapToAddress(
+                    missing=item.get("missing", ""),
+                    why_important=item.get("why_important", ""),
+                    suggestion=item.get("suggestion", ""),
+                )
+            )
+
+        # Parse confidence adjustment
+        conf = data.get("confidence_adjustment", {})
+
+        # Parse meta
+        meta = data.get("meta", {})
+
+        return EditorialFeedback(
+            preferred_synthesis=data.get("preferred_synthesis", "claude"),
             preference_reasoning=data.get("preference_reasoning", ""),
-            final_investment_view=data.get("final_investment_view", "HOLD"),
-            final_conviction=data.get("final_conviction", "medium"),
-            final_thesis=data.get("final_thesis", ""),
-            final_confidence=data.get("final_confidence", 0.5),
-            key_risks=data.get("key_risks", []),
-            key_catalysts=data.get("key_catalysts", []),
-            key_uncertainties=data.get("key_uncertainties", []),
-            evidence_ids=list(base_evidence_ids),
+            claude_score=quality.get("claude_score", 0.5),
+            gpt_score=quality.get("gpt_score", 0.5),
+            key_differentiators=quality.get("key_differentiators", []),
+            incorporate_from_other=incorporate,
+            errors_to_fix=errors,
+            gaps_to_address=gaps,
+            revision_instructions=data.get("revision_instructions", ""),
+            current_confidence=conf.get("current_confidence", 0.5),
+            recommended_confidence=conf.get("recommended_confidence", 0.5),
+            confidence_reasoning=conf.get("reasoning", ""),
+            analysis_quality=meta.get("analysis_quality", "medium"),
+            key_strengths=meta.get("key_strengths", []),
+            key_weaknesses=meta.get("key_weaknesses", []),
         )
 
     async def close(self) -> None:

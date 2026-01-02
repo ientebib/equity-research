@@ -423,31 +423,50 @@ class AnthropicClient:
             if request.stop:
                 params["stop_sequences"] = request.stop
 
-            # Make the API call
-            response = await self._client.messages.create(**params)
-
-            latency_ms = int((time.monotonic() - start_time) * 1000)
-
-            # Extract text content and thinking content
+            # Make the API call with streaming (required for long operations)
+            # Anthropic requires streaming for requests that may take >10 minutes
             content = ""
             thinking_content = ""
-            thinking_tokens = 0
+            input_tokens = 0
+            output_tokens = 0
+            model_name = request.model
+            stop_reason = "stop"
 
-            for block in response.content:
-                if block.type == "text":
-                    content += block.text
-                elif block.type == "thinking":
-                    thinking_content += block.thinking
-                    # Count thinking tokens (rough estimate)
-                    thinking_tokens += len(block.thinking) // 4
+            async with self._client.messages.stream(**params) as stream:
+                async for event in stream:
+                    # Handle different event types
+                    if hasattr(event, 'type'):
+                        if event.type == 'content_block_delta':
+                            if hasattr(event.delta, 'text'):
+                                content += event.delta.text
+                            elif hasattr(event.delta, 'thinking'):
+                                thinking_content += event.delta.thinking
+                        elif event.type == 'message_start':
+                            if hasattr(event.message, 'model'):
+                                model_name = event.message.model
+                        elif event.type == 'message_delta':
+                            if hasattr(event, 'usage'):
+                                output_tokens = getattr(event.usage, 'output_tokens', 0)
+                            if hasattr(event.delta, 'stop_reason'):
+                                stop_reason = event.delta.stop_reason or "stop"
+
+                # Get final message for accurate token counts
+                final_message = await stream.get_final_message()
+                input_tokens = final_message.usage.input_tokens
+                output_tokens = final_message.usage.output_tokens
+                model_name = final_message.model
+                stop_reason = final_message.stop_reason or "stop"
+
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            thinking_tokens = len(thinking_content) // 4  # Rough estimate
 
             return LLMResponse(
                 content=content,
-                model=response.model,
+                model=model_name,
                 provider=self._provider,
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                finish_reason=response.stop_reason or "stop",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                finish_reason=stop_reason,
                 latency_ms=latency_ms,
                 metadata={
                     "thinking": thinking_content,
@@ -484,6 +503,104 @@ class AnthropicClient:
 
             if "thinking" in error_msg.lower():
                 raise LLMError(f"Extended thinking error: {error_msg}") from e
+
+            raise LLMError(f"Anthropic API error: {error_msg}") from e
+
+    @retry(
+        retry=retry_if_exception_type(RateLimitError),
+        wait=wait_exponential(multiplier=1, min=1, max=60),
+        stop=stop_after_attempt(5),
+        reraise=True,
+    )
+    async def complete_with_web_search(self, request: LLMRequest) -> LLMResponse:
+        """Send a completion request with web search capability.
+
+        Uses Claude's built-in web search tool to find current information.
+
+        Args:
+            request: The LLM request.
+
+        Returns:
+            LLM response with web search results incorporated.
+
+        Raises:
+            LLMError: If the request fails.
+        """
+        start_time = time.monotonic()
+
+        try:
+            # Convert messages
+            system_message, messages = self._convert_messages(request.messages)
+
+            # Build the request parameters with web search tool
+            params: dict[str, Any] = {
+                "model": request.model,
+                "messages": messages,
+                "max_tokens": request.max_tokens or 16000,
+                "tools": [
+                    {
+                        "type": "web_search_20250305",
+                        "name": "web_search",
+                        "max_uses": 10,  # Allow up to 10 searches
+                    }
+                ],
+            }
+
+            if system_message:
+                params["system"] = system_message
+
+            if request.temperature is not None:
+                params["temperature"] = request.temperature
+
+            if request.stop:
+                params["stop_sequences"] = request.stop
+
+            # Make the API call
+            response = await self._client.messages.create(**params)
+
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+
+            # Extract text content (web search results are incorporated into the response)
+            content = ""
+            for block in response.content:
+                if block.type == "text":
+                    content += block.text
+
+            return LLMResponse(
+                content=content,
+                model=response.model,
+                provider=self._provider,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                finish_reason=response.stop_reason or "stop",
+                latency_ms=latency_ms,
+            )
+
+        except AnthropicRateLimitError as e:
+            retry_after = None
+            if hasattr(e, "response") and e.response:
+                retry_after_header = e.response.headers.get("retry-after")
+                if retry_after_header:
+                    retry_after = float(retry_after_header)
+
+            logger.warning(
+                "Anthropic rate limit hit",
+                model=request.model,
+                retry_after=retry_after,
+            )
+            raise RateLimitError(str(e), retry_after=retry_after) from e
+
+        except APIError as e:
+            error_msg = str(e)
+
+            if "authentication" in error_msg.lower() or "api key" in error_msg.lower():
+                raise AuthenticationError(f"Anthropic authentication failed: {error_msg}") from e
+
+            if "model" in error_msg.lower() and "not found" in error_msg.lower():
+                raise ModelNotFoundError(f"Model not found: {request.model}") from e
+
+            if "context" in error_msg.lower() or "too long" in error_msg.lower():
+                raise ContextLengthError(f"Context length exceeded: {error_msg}") from e
 
             raise LLMError(f"Anthropic API error: {error_msg}") from e
 

@@ -15,13 +15,18 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 import traceback
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+ROOT = Path(__file__).parent.parent.parent
+load_dotenv(ROOT / ".env")
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # Add parent src to path for pipeline imports
-ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 app = FastAPI(title="K+ Research API", version="1.0.0")
@@ -178,6 +183,79 @@ def load_run_data(run_id: str) -> dict:
                 data["stages"][key] = json.loads(file_path.read_text())
             except Exception:
                 pass
+
+    # Extract structured report data for frontend
+    if "stage6" in data["stages"]:
+        s6 = data["stages"]["stage6"]
+        data["structured_report"] = {
+            "investment_view": s6.get("investment_view"),
+            "conviction": s6.get("conviction"),
+            "confidence": s6.get("overall_confidence"),
+            "thesis_summary": s6.get("thesis_summary"),
+            "full_report": s6.get("full_report"),
+        }
+
+        # Parse scenarios from the full_report JSON block if present
+        full_report = s6.get("full_report", "")
+        if "```json" in full_report:
+            try:
+                json_start = full_report.rfind("```json") + 7
+                json_end = full_report.rfind("```")
+                if json_start < json_end:
+                    report_json = json.loads(full_report[json_start:json_end])
+                    data["structured_report"]["scenarios"] = report_json.get("scenarios")
+                    data["structured_report"]["top_risks"] = report_json.get("top_risks")
+                    data["structured_report"]["key_debates"] = report_json.get("key_debates")
+                    data["structured_report"]["evidence_gaps"] = report_json.get("evidence_gaps")
+                    data["structured_report"]["downgrade_triggers"] = report_json.get("downgrade_triggers")
+            except:
+                pass
+
+    # Extract editorial feedback
+    if "stage5" in data["stages"]:
+        s5 = data["stages"]["stage5"]
+        data["editorial_feedback"] = {
+            "preferred_synthesis": s5.get("preferred_synthesis"),
+            "preference_reasoning": s5.get("preference_reasoning"),
+            "claude_score": s5.get("claude_score"),
+            "gpt_score": s5.get("gpt_score"),
+            "key_differentiators": s5.get("key_differentiators"),
+            "key_strengths": s5.get("key_strengths"),
+            "key_weaknesses": s5.get("key_weaknesses"),
+        }
+
+    # Extract discovery threads for traceability
+    if "stage2" in data["stages"]:
+        s2 = data["stages"]["stage2"]
+        data["discovery"] = {
+            "official_segments": s2.get("official_segments", []),
+            "research_threads": s2.get("research_threads", []),
+        }
+
+    # Extract vertical analyses for traceability
+    if "stage3_verticals" in data["stages"]:
+        data["verticals"] = data["stages"]["stage3_verticals"]
+
+    # Extract both syntheses for comparison
+    if "stage4_claude" in data["stages"]:
+        s4c = data["stages"]["stage4_claude"]
+        data["claude_synthesis"] = {
+            "investment_view": s4c.get("investment_view"),
+            "conviction": s4c.get("conviction"),
+            "confidence": s4c.get("overall_confidence"),
+            "thesis_summary": s4c.get("thesis_summary"),
+            "full_report": s4c.get("full_report"),
+        }
+
+    if "stage4_gpt" in data["stages"]:
+        s4g = data["stages"]["stage4_gpt"]
+        data["gpt_synthesis"] = {
+            "investment_view": s4g.get("investment_view"),
+            "conviction": s4g.get("conviction"),
+            "confidence": s4g.get("overall_confidence"),
+            "thesis_summary": s4g.get("thesis_summary"),
+            "full_report": s4g.get("full_report"),
+        }
 
     return data
 
@@ -443,6 +521,26 @@ async def cancel_run(run_id: str):
     return {"message": "Run cancelled", "run_id": run_id}
 
 
+@app.delete("/runs/{run_id}")
+async def delete_run(run_id: str):
+    """Delete a run and its data. Only works for completed/failed runs, not active ones."""
+    import shutil
+    
+    # Don't allow deleting active runs
+    if run_id in active_runs:
+        raise HTTPException(status_code=400, detail="Cannot delete an active run. Cancel it first.")
+    
+    run_dir = get_output_dir() / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    try:
+        shutil.rmtree(run_dir)
+        return {"message": "Run deleted", "run_id": run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete run: {str(e)}")
+
+
 @app.get("/runs/{run_id}/stream")
 async def stream_run(run_id: str):
     """Stream real-time events from a run via SSE."""
@@ -571,6 +669,63 @@ async def update_agent_prompt(agent_file: str, body: dict):
         "message": f"Updated {agent_file}",
         "backup": str(backup_path),
     }
+
+
+# ============== Financials Endpoint ==============
+
+@app.get("/financials/{ticker}")
+async def get_financials(ticker: str):
+    """Fetch live financial data from FMP API for a ticker."""
+    from er.data.fmp_client import FMPClient
+    from er.evidence.store import EvidenceStore
+
+    ticker = ticker.upper().strip()
+    if not ticker or len(ticker) > 5:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    # Create a temporary evidence store (we don't persist for this endpoint)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        evidence_store = EvidenceStore(Path(tmpdir))
+        await evidence_store.init()  # Initialize the store before using
+        client = FMPClient(evidence_store)
+
+        try:
+            # Fetch all financial data
+            context = await client.get_full_context(ticker, include_transcripts=False)
+            await client.close()
+            await evidence_store.close()
+
+            # Structure the response for frontend consumption
+            return {
+                "ticker": ticker,
+                "profile": context.get("profile", {}),
+                "income_statement": {
+                    "annual": context.get("income_statement_annual", []),
+                    "quarterly": context.get("income_statement_quarterly", []),
+                },
+                "balance_sheet": {
+                    "annual": context.get("balance_sheet_annual", []),
+                },
+                "cash_flow": {
+                    "annual": context.get("cash_flow_annual", []),
+                },
+                "segmentation": {
+                    "product": context.get("revenue_product_segmentation", []),
+                    "geographic": context.get("revenue_geographic_segmentation", []),
+                },
+                "news": context.get("news", []),
+                "analyst": {
+                    "estimates": context.get("analyst_estimates", []),
+                    "price_target_summary": context.get("price_target_summary", {}),
+                    "price_target_consensus": context.get("price_target_consensus", {}),
+                    "grades": context.get("analyst_grades", []),
+                },
+            }
+        except Exception as e:
+            await client.close()
+            await evidence_store.close()
+            raise HTTPException(status_code=500, detail=f"Failed to fetch financials: {str(e)}")
 
 
 # ============== Main ==============

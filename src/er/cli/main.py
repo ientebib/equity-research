@@ -16,6 +16,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 from er import __version__
@@ -42,6 +43,171 @@ def _get_settings_safe() -> Settings | None:
         return None
 
 
+def _load_transcripts_from_dir(ticker: str, transcripts_dir: Path, num_quarters: int = 4) -> list[dict]:
+    """Load transcripts from text files in a directory.
+
+    Expected files: q3_2025.txt, q2_2025.txt, q1_2025.txt, q4_2024.txt
+
+    Args:
+        ticker: Stock ticker symbol.
+        transcripts_dir: Directory containing transcript files.
+        num_quarters: Number of quarters to load.
+
+    Returns:
+        List of transcript dicts.
+    """
+    import re
+
+    console.print()
+    console.print(f"[cyan]Loading transcripts from:[/cyan] {transcripts_dir}")
+
+    # Calculate quarters (Q3 2025 -> Q2 2025 -> Q1 2025 -> Q4 2024)
+    current_year = 2025
+    current_quarter = 3
+
+    quarters_to_load = []
+    q, y = current_quarter, current_year
+    for _ in range(num_quarters):
+        quarters_to_load.append((q, y))
+        q -= 1
+        if q == 0:
+            q = 4
+            y -= 1
+
+    transcripts = []
+
+    for quarter, year in quarters_to_load:
+        # Try different file name patterns
+        patterns = [
+            f"q{quarter}_{year}.txt",
+            f"Q{quarter}_{year}.txt",
+            f"q{quarter}{year}.txt",
+            f"{year}_q{quarter}.txt",
+        ]
+
+        found = False
+        for pattern in patterns:
+            file_path = transcripts_dir / pattern
+            if file_path.exists():
+                text = file_path.read_text(encoding="utf-8")
+                transcripts.append({
+                    "ticker": ticker,
+                    "quarter": quarter,
+                    "year": year,
+                    "text": text,
+                    "source": "file",
+                    "date": f"{year}-{quarter * 3:02d}-01",
+                })
+                console.print(f"  [green]✓[/green] Q{quarter} {year}: {len(text):,} chars from {pattern}")
+                found = True
+                break
+
+        if not found:
+            console.print(f"  [yellow]![/yellow] Q{quarter} {year}: not found (tried {patterns[0]})")
+
+    console.print()
+    if transcripts:
+        console.print(f"[bold green]Loaded {len(transcripts)} transcript(s)[/bold green]")
+    else:
+        console.print("[yellow]No transcripts found. Analysis will proceed without them.[/yellow]")
+
+    return transcripts
+
+
+def _collect_transcripts(ticker: str, num_quarters: int = 4) -> list[dict]:
+    """Interactively collect earnings call transcripts from user.
+
+    Prompts user to paste transcripts for the last N quarters.
+
+    Args:
+        ticker: Stock ticker symbol.
+        num_quarters: Number of quarters to collect (default 4).
+
+    Returns:
+        List of transcript dicts with quarter, year, and text.
+    """
+    from datetime import datetime
+
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Earnings Call Transcripts for {ticker}[/bold]\n\n"
+            "Transcripts are essential for understanding management's perspective.\n"
+            "You can get them from:\n"
+            "  - Seeking Alpha (seekingalpha.com/earnings/earnings-call-transcripts)\n"
+            "  - Company IR website\n"
+            "  - The Motley Fool\n\n"
+            "[dim]Paste the full transcript text, then press Enter twice to submit.[/dim]",
+            title="[cyan]Transcript Collection[/cyan]",
+            border_style="cyan",
+        )
+    )
+
+    # Calculate quarters to collect (starting from Q3 2025 going back)
+    # Current: Q3 2025 -> Q2 2025 -> Q1 2025 -> Q4 2024
+    current_year = 2025
+    current_quarter = 3
+
+    quarters_to_collect = []
+    q, y = current_quarter, current_year
+    for _ in range(num_quarters):
+        quarters_to_collect.append((q, y))
+        q -= 1
+        if q == 0:
+            q = 4
+            y -= 1
+
+    transcripts = []
+
+    for i, (quarter, year) in enumerate(quarters_to_collect, 1):
+        console.print()
+        console.print(f"[bold cyan]({i}/{num_quarters}) Q{quarter} {year} Transcript[/bold cyan]")
+        console.print("[dim]Paste transcript below. Press Enter twice when done, or type 'skip' to skip this quarter:[/dim]")
+        console.print()
+
+        # Collect multi-line input
+        lines = []
+        empty_line_count = 0
+
+        while True:
+            try:
+                line = input()
+                if line.strip().lower() == "skip":
+                    console.print(f"[yellow]Skipping Q{quarter} {year}[/yellow]")
+                    break
+                if line == "":
+                    empty_line_count += 1
+                    if empty_line_count >= 2:
+                        break
+                    lines.append(line)
+                else:
+                    empty_line_count = 0
+                    lines.append(line)
+            except EOFError:
+                break
+
+        text = "\n".join(lines).strip()
+
+        if text and text.lower() != "skip":
+            transcripts.append({
+                "ticker": ticker,
+                "quarter": quarter,
+                "year": year,
+                "text": text,
+                "source": "manual",
+                "date": f"{year}-{quarter * 3:02d}-01",  # Approximate date
+            })
+            console.print(f"[green]✓ Received Q{quarter} {year} transcript ({len(text):,} chars)[/green]")
+
+    console.print()
+    if transcripts:
+        console.print(f"[bold green]Collected {len(transcripts)} transcript(s)[/bold green]")
+    else:
+        console.print("[yellow]No transcripts collected. Analysis will proceed without them.[/yellow]")
+
+    return transcripts
+
+
 @app.command()
 def analyze(
     ticker: Annotated[str, typer.Argument(help="Stock ticker symbol (e.g., AAPL)")],
@@ -60,6 +226,26 @@ def analyze(
     output_dir: Annotated[
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Output directory"),
+    ] = None,
+    no_transcripts: Annotated[
+        bool,
+        typer.Option("--no-transcripts", help="Skip transcript collection"),
+    ] = False,
+    num_quarters: Annotated[
+        int,
+        typer.Option("--quarters", "-q", help="Number of transcript quarters to collect"),
+    ] = 4,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Show detailed progress logs"),
+    ] = False,
+    transcripts_dir: Annotated[
+        Optional[Path],
+        typer.Option("--transcripts-dir", "-t", help="Directory with transcript files (q3_2025.txt, q2_2025.txt, etc.)"),
+    ] = None,
+    resume: Annotated[
+        Optional[Path],
+        typer.Option("--resume", help="Resume from a previous run directory (e.g., output/run_GOOGL_20251224_140000)"),
     ] = None,
 ) -> None:
     """Run equity research analysis on a stock ticker.
@@ -89,80 +275,167 @@ def analyze(
     # Normalize ticker
     ticker = ticker.upper().strip()
 
-    # Create run state
-    run_state = RunState.create(ticker=ticker, budget_usd=effective_budget)
+    # Handle resume mode
+    is_resuming = resume is not None
+    if is_resuming:
+        if not resume.exists():
+            error_console.print(f"[red]Error:[/red] Resume directory not found: {resume}")
+            raise typer.Exit(1)
 
-    # Create output directory
-    run_output_dir = effective_output_dir / run_state.run_id
-    run_output_dir.mkdir(parents=True, exist_ok=True)
+        # Use the existing run directory
+        run_output_dir = resume
+        manifest_path = run_output_dir / "manifest.json"
 
-    # Write manifest
-    manifest = {
-        "run_id": run_state.run_id,
-        "ticker": ticker,
-        "started_at": run_state.started_at.isoformat(),
-        "budget_usd": effective_budget,
-        "max_rounds": effective_max_rounds,
-        "dry_run": dry_run,
-        "phase": run_state.phase.value,
-        "providers": settings.available_providers,
-    }
-    manifest_path = run_output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        if manifest_path.exists():
+            existing_manifest = json.loads(manifest_path.read_text())
+            run_id = existing_manifest.get("run_id", "resumed_run")
+        else:
+            run_id = f"run_{ticker}_resumed"
 
-    # Print run info
-    console.print()
-    console.print(
-        Panel(
-            f"[bold]Ticker:[/bold] {ticker}\n"
-            f"[bold]Run ID:[/bold] {run_state.run_id}\n"
-            f"[bold]Budget:[/bold] ${effective_budget:.2f}\n"
-            f"[bold]Max Rounds:[/bold] {effective_max_rounds}\n"
-            f"[bold]Providers:[/bold] {', '.join(settings.available_providers)}\n"
-            f"[bold]Dry Run:[/bold] {dry_run}",
-            title="[bold cyan]Equity Research Analysis[/bold cyan]",
-            border_style="cyan",
+        # Check which stages are already done
+        stage_files = [
+            "stage1_company_context.json",
+            "stage2_discovery.json",
+            "stage3_verticals.json",
+            "stage4_claude_synthesis.json",
+            "stage5_editorial_feedback.json",
+        ]
+        completed = [f for f in stage_files if (run_output_dir / f).exists()]
+
+        console.print()
+        console.print(
+            Panel(
+                f"[bold]Ticker:[/bold] {ticker}\n"
+                f"[bold]Mode:[/bold] [yellow]RESUME[/yellow]\n"
+                f"[bold]Resume Directory:[/bold] {run_output_dir}\n"
+                f"[bold]Completed Stages:[/bold] {len(completed)}/6\n"
+                f"[bold]Budget:[/bold] ${effective_budget:.2f}\n"
+                f"[bold]Providers:[/bold] {', '.join(settings.available_providers)}",
+                title="[bold yellow]Resuming Analysis[/bold yellow]",
+                border_style="yellow",
+            )
         )
-    )
 
-    console.print(f"\n[dim]Output directory:[/dim] {run_output_dir}")
-    console.print(f"[dim]Manifest:[/dim] {manifest_path}")
+        if completed:
+            console.print("\n[dim]Loaded checkpoints:[/dim]")
+            for f in completed:
+                console.print(f"  [green]✓[/green] {f}")
+    else:
+        # Create run state for new run
+        run_state = RunState.create(ticker=ticker, budget_usd=effective_budget)
+
+        # Create output directory
+        run_output_dir = effective_output_dir / run_state.run_id
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write manifest
+        manifest = {
+            "run_id": run_state.run_id,
+            "ticker": ticker,
+            "started_at": run_state.started_at.isoformat(),
+            "budget_usd": effective_budget,
+            "max_rounds": effective_max_rounds,
+            "dry_run": dry_run,
+            "phase": run_state.phase.value,
+            "providers": settings.available_providers,
+        }
+        manifest_path = run_output_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        # Print run info
+        console.print()
+        console.print(
+            Panel(
+                f"[bold]Ticker:[/bold] {ticker}\n"
+                f"[bold]Run ID:[/bold] {run_state.run_id}\n"
+                f"[bold]Budget:[/bold] ${effective_budget:.2f}\n"
+                f"[bold]Max Rounds:[/bold] {effective_max_rounds}\n"
+                f"[bold]Providers:[/bold] {', '.join(settings.available_providers)}\n"
+                f"[bold]Dry Run:[/bold] {dry_run}",
+                title="[bold cyan]Equity Research Analysis[/bold cyan]",
+                border_style="cyan",
+            )
+        )
+
+        console.print(f"\n[dim]Output directory:[/dim] {run_output_dir}")
+        console.print(f"[dim]Manifest:[/dim] {manifest_path}")
+
+    # Collect transcripts (from files or interactively)
+    # Skip transcript collection if resuming (use existing transcripts)
+    transcripts: list[dict] = []
+    if is_resuming:
+        # Load existing transcripts from resume directory
+        existing_transcripts_path = run_output_dir / "transcripts.json"
+        if existing_transcripts_path.exists():
+            transcripts = json.loads(existing_transcripts_path.read_text())
+            console.print(f"\n[dim]Using {len(transcripts)} existing transcripts from checkpoint[/dim]")
+    elif not dry_run and not no_transcripts:
+        if transcripts_dir:
+            # Load from files
+            transcripts = _load_transcripts_from_dir(ticker, transcripts_dir, num_quarters)
+        else:
+            # Interactive collection
+            transcripts = _collect_transcripts(ticker, num_quarters)
+
+        # Save transcripts to run directory
+        if transcripts:
+            transcripts_path = run_output_dir / "transcripts.json"
+            transcripts_path.write_text(json.dumps(transcripts, indent=2))
+            console.print(f"[dim]Transcripts saved to:[/dim] {transcripts_path}")
 
     if dry_run:
         console.print("\n[yellow]Dry run mode - no APIs will be called.[/yellow]")
-        run_state.phase = Phase.COMPLETE
-        manifest["phase"] = run_state.phase.value
-        manifest["completed_at"] = utc_now().isoformat()
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        if not is_resuming:
+            run_state.phase = Phase.COMPLETE
+            manifest["phase"] = run_state.phase.value
+            manifest["completed_at"] = utc_now().isoformat()
+            manifest_path.write_text(json.dumps(manifest, indent=2))
     else:
         # Run the actual pipeline
         import asyncio
         from er.coordinator.pipeline import ResearchPipeline, PipelineConfig
-        from rich.progress import Progress, SpinnerColumn, TextColumn
+        from er.logging import setup_logging
+        from er.cli.progress import PipelineProgress
 
-        console.print("\n[bold green]Starting 5-stage analysis pipeline...[/bold green]\n")
+        # Set up logging based on verbose flag
+        if verbose:
+            setup_logging(log_level="DEBUG", log_file=run_output_dir / "debug.log")
+            if is_resuming:
+                console.print("\n[bold yellow]Resuming 6-stage analysis pipeline (verbose mode)...[/bold yellow]\n")
+            else:
+                console.print("\n[bold green]Starting 6-stage analysis pipeline (verbose mode)...[/bold green]\n")
+        else:
+            setup_logging(log_level="INFO", log_file=run_output_dir / "run.log")
+            console.print()  # Blank line before progress display
 
         pipeline_config = PipelineConfig(
+            output_dir=run_output_dir,
+            resume_from_run_dir=resume if is_resuming else None,  # Pass resume directory
             max_budget_usd=effective_budget,
-            include_transcripts=True,
-            num_transcript_quarters=4,
-            use_deep_research_discovery=True,
+            include_transcripts=len(transcripts) > 0,
+            num_transcript_quarters=num_quarters,
+            use_web_search_discovery=True,
             use_deep_research_verticals=True,
             max_parallel_verticals=5,
+            manual_transcripts=transcripts,  # Pass collected transcripts
         )
 
         try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(f"Analyzing {ticker}...", total=None)
-
+            if verbose:
+                # Verbose mode: no live display, logs stream to console
                 pipeline = ResearchPipeline(settings=settings, config=pipeline_config)
                 result = asyncio.run(pipeline.run(ticker))
-
-                progress.update(task, description="[green]Analysis complete!")
+            else:
+                # Normal mode: live progress display
+                progress_display = PipelineProgress(console, ticker, effective_budget)
+                pipeline = ResearchPipeline(
+                    settings=settings,
+                    config=pipeline_config,
+                    progress_callback=progress_display.update,
+                )
+                with progress_display:
+                    result = asyncio.run(pipeline.run(ticker))
+                    progress_display.mark_complete()
 
             # Generate report
             report_path = run_output_dir / "report.md"
@@ -170,14 +443,19 @@ def analyze(
             report_path.write_text(report_content)
 
             # Update manifest
+            if is_resuming:
+                # Load existing manifest for resume mode
+                manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+                manifest["resumed_at"] = result.started_at.isoformat()
+
             manifest["phase"] = "complete"
             manifest["completed_at"] = result.completed_at.isoformat()
             manifest["total_cost_usd"] = result.total_cost_usd
             manifest["duration_seconds"] = result.duration_seconds
             manifest["final_verdict"] = {
-                "investment_view": result.final_verdict.final_investment_view,
-                "conviction": result.final_verdict.final_conviction,
-                "confidence": result.final_verdict.final_confidence,
+                "investment_view": result.final_report.investment_view,
+                "conviction": result.final_report.conviction,
+                "confidence": result.final_report.overall_confidence,
             }
             manifest_path.write_text(json.dumps(manifest, indent=2))
 
@@ -185,10 +463,10 @@ def analyze(
             console.print()
             console.print(
                 Panel(
-                    f"[bold]Investment View:[/bold] {result.final_verdict.final_investment_view}\n"
-                    f"[bold]Conviction:[/bold] {result.final_verdict.final_conviction}\n"
-                    f"[bold]Confidence:[/bold] {result.final_verdict.final_confidence:.0%}\n\n"
-                    f"[bold]Thesis:[/bold]\n{result.final_verdict.final_thesis[:300]}...\n\n"
+                    f"[bold]Investment View:[/bold] {result.final_report.investment_view}\n"
+                    f"[bold]Conviction:[/bold] {result.final_report.conviction}\n"
+                    f"[bold]Confidence:[/bold] {result.final_report.overall_confidence:.0%}\n\n"
+                    f"[bold]Thesis:[/bold]\n{result.final_report.thesis_summary[:300]}...\n\n"
                     f"[dim]Cost: ${result.total_cost_usd:.2f} | Duration: {result.duration_seconds:.0f}s[/dim]",
                     title=f"[bold green]{ticker} Research Complete[/bold green]",
                     border_style="green",
@@ -198,6 +476,9 @@ def analyze(
 
         except Exception as e:
             error_console.print(f"\n[red]Error:[/red] {e}")
+            # Load/create manifest for error recording
+            if is_resuming:
+                manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
             manifest["phase"] = "failed"
             manifest["error"] = str(e)
             manifest_path.write_text(json.dumps(manifest, indent=2))

@@ -58,6 +58,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] | None = None
     finish_reason: str = "stop"
     latency_ms: int = 0
+    metadata: dict[str, Any] | None = None  # Additional provider-specific data
 
     @property
     def total_tokens(self) -> int:

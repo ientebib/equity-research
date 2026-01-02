@@ -67,6 +67,7 @@ class DataOrchestratorAgent(Agent):
         run_state: RunState,
         include_transcripts: bool = True,
         num_transcript_quarters: int = 4,
+        manual_transcripts: list[dict] | None = None,
         **kwargs: Any,
     ) -> CompanyContext:
         """Execute Stage 1: Fetch all data and build CompanyContext.
@@ -75,6 +76,7 @@ class DataOrchestratorAgent(Agent):
             run_state: Current run state with ticker.
             include_transcripts: Whether to fetch earnings transcripts.
             num_transcript_quarters: Number of transcript quarters to fetch.
+            manual_transcripts: User-provided transcripts (from CLI).
 
         Returns:
             CompanyContext with all fetched data.
@@ -82,6 +84,7 @@ class DataOrchestratorAgent(Agent):
         self.log_info(
             "Starting data orchestration",
             ticker=run_state.ticker,
+            has_manual_transcripts=bool(manual_transcripts),
         )
 
         run_state.phase = Phase.FETCH_DATA
@@ -89,17 +92,28 @@ class DataOrchestratorAgent(Agent):
         # Get FMP client
         fmp_client = await self._get_fmp_client()
 
+        # If we have manual transcripts, don't try to fetch from FMP
+        fetch_transcripts = include_transcripts and not manual_transcripts
+
         # Fetch full context from FMP
         self.log_info("Fetching company context from FMP", ticker=run_state.ticker)
 
         fmp_data = await fmp_client.get_full_context(
             symbol=run_state.ticker,
-            include_transcripts=include_transcripts,
+            include_transcripts=fetch_transcripts,
             num_transcript_quarters=num_transcript_quarters,
         )
 
         # Convert to CompanyContext
         company_context = CompanyContext.from_fmp_data(fmp_data)
+
+        # Inject manual transcripts if provided
+        if manual_transcripts:
+            self.log_info(
+                "Using manual transcripts",
+                count=len(manual_transcripts),
+            )
+            company_context.transcripts = manual_transcripts
 
         # Also fetch real-time market data from yfinance for current price
         try:

@@ -1,15 +1,15 @@
 """
 Vertical Analyst Agent (Stage 3).
 
-Deep dives into a single research thread/vertical using o4-mini-deep-research.
-Multiple instances run in parallel for different verticals.
+Deep dives into research groups using OpenAI o4-mini Deep Research.
+Runs 2 parallel instances - one per research group.
 
 Model: o4-mini-deep-research (with web search)
 """
 
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,130 +18,293 @@ from er.llm.openai_client import OpenAIClient
 from er.types import (
     CompanyContext,
     DiscoveredThread,
+    GroupResearchOutput,
     Phase,
-    Risk,
+    ResearchGroup,
     RunState,
-    ThesisCase,
     VerticalAnalysis,
 )
 
 
-# Vertical analysis prompt template
-VERTICAL_ANALYST_PROMPT = """You are a Vertical Analyst for an institutional equity research system.
+# Deep Research prompt template - handles multiple verticals in a research group
+DEEP_RESEARCH_PROMPT = """You are a Deep Research Analyst for an institutional equity research system.
 
-TODAY'S DATE: {date}
-COMPANY: {ticker} ({company_name})
-YOUR VERTICAL: {vertical_name}
+## CRITICAL: DATE AND DATA GROUNDING
 
-## CRITICAL INSTRUCTION
-DO NOT rely on training data for financials - use ONLY the provided CompanyContext below.
-Use web search to find recent developments, competitive intelligence, and analyst opinions.
+TODAY IS: {date}
+CURRENT MONTH: {current_month} {current_year}
 
-## CompanyContext (Ground Truth Data)
-{company_context}
+Your training data is STALE. You MUST use web search for anything that may have changed.
 
-## Your Assigned Vertical
-Name: {vertical_name}
-Type: {thread_type}
-Priority: {priority}
-Description: {description}
-Hypothesis: {hypothesis}
+## QUARTERLY DATA IS THE LATEST
 
-## Research Questions to Answer
-{research_questions}
+The JSON contains data through Q3 2025:
+- Q3 2025 = MOST RECENT (use this as baseline)
+- Q2 2025, Q1 2025 = Recent quarters (analyze the TREND)
+- FY 2024 = OLD - one year ago, historical context only
 
-## Your Task: Deep Dive Analysis
+ALWAYS cite quarterly data. "Q3 2025 revenue was $X" not "annual revenue is $Y"
 
-### 1. Business Understanding
-- What is this vertical/segment? How does it make money?
-- What's the revenue model? Key customers?
-- What are the unit economics (if discoverable)?
+**DO NOT USE FY2024** as "current" state. FY2024 data is 12+ months old. Only use for historical comparison.
 
-### 2. Competitive Position
-- Who are the direct competitors?
-- What's the market share situation?
-- What's the moat (if any)? Is it widening or narrowing?
-
-### 3. Growth Drivers
-- What drives growth in this vertical?
-- TAM analysis - how big is the opportunity?
-- What's the growth rate? Is it accelerating or decelerating?
-
-### 4. Key Risks
-- What could go wrong?
-- Competitive threats, regulatory risk, execution risk?
-- Technology disruption risk?
-
-### 5. Bull Case
-- What has to go right for this vertical to significantly exceed expectations?
-- What would the key metrics look like?
-- What catalysts would prove this case?
-
-### 6. Bear Case
-- What has to go wrong for this vertical to disappoint?
-- What would trigger a bearish scenario?
-- What are the warning signs to watch?
-
-## Output Requirements
-
-You MUST output valid JSON with this exact structure:
+## GROUND TRUTH DATA (DO NOT CONTRADICT)
 
 ```json
-{{
-  "business_understanding": "Detailed explanation of this vertical's business model",
-  "competitive_position": "Analysis of competitive dynamics and positioning",
-  "growth_drivers": ["List of key growth drivers"],
-  "key_risks": [
-    {{
-      "name": "Risk name",
-      "description": "What the risk is",
-      "probability": "high|medium|low",
-      "impact": "high|medium|low",
-      "mitigants": ["What could reduce this risk"]
-    }}
-  ],
-  "bull_case": {{
-    "thesis": "The bull case narrative",
-    "key_assumptions": ["Assumptions that must be true"],
-    "key_metrics": ["Metrics to watch"],
-    "catalysts": ["Events that would prove the bull case"],
-    "confidence": 0.7
-  }},
-  "bear_case": {{
-    "thesis": "The bear case narrative",
-    "key_assumptions": ["Assumptions for the bear case"],
-    "key_metrics": ["Warning metrics"],
-    "catalysts": ["Events that would prove the bear case"],
-    "confidence": 0.3
-  }},
-  "overall_confidence": 0.65,
-  "confidence_drivers": ["What gives you confidence", "What reduces confidence"],
-  "unanswered_questions": ["Questions you couldn't fully answer"],
-  "data_gaps": ["Data you couldn't find"]
-}}
+{company_context}
 ```
 
-## Hard Rules
+## YOUR RESEARCH ASSIGNMENT
 
-1. NO CLAIMS WITHOUT EVIDENCE - cite specific sources for material claims
-2. Use confidence < 0.5 if evidence is thin
-3. Flag what you couldn't find explicitly
-4. Be specific about competitors and market dynamics
-5. Quantify where possible (market size, growth rates, market share)
-6. Distinguish between facts and your inferences
-"""
+Company: {ticker} ({company_name})
+Research Group: **{group_name}**
+Theme: {group_theme}
+Focus: {group_focus}
+
+### Verticals to Research:
+{verticals_detail}
+
+## CO-ANALYST COORDINATION
+
+You are NOT the only Deep Research agent. Your co-analyst is researching other verticals in parallel.
+
+**Your co-analyst is researching:**
+{other_groups_detail}
+
+**Coordination Rules:**
+1. **DO NOT duplicate their work** - If a topic belongs to their group, don't deep-dive it
+2. **Note cross-references briefly** - If you find info relevant to their verticals, mention it in "cross_vertical_insights" but don't analyze it in depth
+3. **Focus on YOUR verticals** - Your time and tokens are limited. Go deep on your assignment, not broad on everything
+4. **Trust the synthesizer** - A synthesis agent will combine both analyses later. You don't need the complete picture alone.
+
+**Example:** If your co-analyst is researching "Google Cloud", and you find a news article about cloud competition while researching "AI/ML Infrastructure", just note "See co-analyst's Google Cloud analysis for competitive dynamics" - don't analyze AWS vs GCP yourself.
+
+## CRITICAL: USE DISCOVERY OUTPUT
+
+Discovery Agent already identified the verticals and research questions. Your job is to ANSWER those questions, not re-discover.
+
+For each vertical in your group:
+- Discovery gave you research questions. Answer them.
+- Discovery gave you a hypothesis. Validate or refute it.
+- Discovery identified data gaps. Fill them.
+
+Do NOT:
+- Ignore the research questions and do your own thing
+- Skip verticals Discovery assigned to you
+- Invent new verticals (that was Discovery's job)
+
+## MANDATORY WEB SEARCHES
+
+You MUST execute targeted searches. Claiming to search without actually searching is detectable and a failure.
+
+### What You Already Have (DO NOT SEARCH FOR):
+- Revenue numbers → in JSON (income_statement_quarterly)
+- Growth rates → calculable from JSON
+- Margins → in JSON
+- Segment breakdown → in JSON (revenue_product_segmentation)
+
+### What You MUST Search For (NOT in JSON):
+
+1. **Competitive position:** "{ticker} vs [competitor] [vertical] market share 2025"
+2. **Competitor moves:** "[main competitor] [vertical] announcement {current_year}"
+3. **Recent developments:** "{ticker} [vertical] news {current_month} {current_year}"
+4. **Analyst views:** "{ticker} [vertical] analyst outlook 2025"
+5. **Industry trends:** "[vertical industry] growth forecast 2025"
+
+### Search Quality Requirements:
+
+- **NEVER search for revenue/growth/margins** - you have this in JSON
+- Search for CONTEXT: market share, competitive moves, analyst views, news
+- Use SPECIFIC queries with dates
+- BAD: "Google Cloud" → too vague, might return financials you shouldn't use
+- GOOD: "Google Cloud vs AWS market share Q3 2025"
+- GOOD: "AWS re:Invent 2025 announcements" (competitor context)
+
+### You Must Report:
+```json
+"searches_performed": [
+  {{
+    "query": "exact query you used",
+    "source_found": "publication name",
+    "date_of_source": "YYYY-MM-DD",
+    "key_finding": "what you learned"
+  }}
+]
+```
+
+**If you list fewer than 6 searches per group, you haven't searched enough for competitive/market context.**
+
+## RESEARCH METHODOLOGY
+
+For EACH vertical:
+
+### 1. Financial Analysis (FROM JSON ONLY)
+- Q3 2025 revenue and growth
+- Q1->Q2->Q3 2025 trend (accelerating/decelerating?)
+- Margin trajectory if available
+- DO NOT invent numbers. Use JSON or say "not available"
+
+### 2. Competitive Position (WEB SEARCH REQUIRED)
+- Current market share (cite source, cite date)
+- Key competitors and their recent moves
+- Moat assessment - is it strengthening or weakening?
+- Search for "[competitor] news {current_month} {current_year}"
+
+### 3. Recent Developments (WEB SEARCH REQUIRED)
+- What happened in the last 60 days?
+- Product launches, partnerships, leadership changes
+- Analyst upgrades/downgrades
+- DO NOT use training data. SEARCH.
+
+### 4. Key Uncertainties
+What are the open questions that could swing the outlook either way?
+- What would need to happen for this vertical to significantly outperform?
+- What would need to happen for it to significantly underperform?
+- Be SPECIFIC. Not "growth could slow" but "if [metric] changes to [X]"
+
+## OUTPUT REQUIREMENTS
+
+**Write tight, information-dense prose. Target 3,000-4,000 tokens per vertical.**
+
+Output your analysis as a structured research report in markdown. NO JSON output.
+
+### CRITICAL: BE AGNOSTIC
+
+You are a RESEARCHER, not an investment analyst. Your job is to gather and present facts objectively.
+
+DO NOT:
+- Form investment conclusions (that's the Synthesizer's job)
+- Say things like "this is bullish" or "this is bearish"
+- Recommend or suggest investment views
+- Use language like "verdict", "thesis", or "view"
+
+DO:
+- Present facts and data objectively
+- Identify both positive and negative dynamics
+- Highlight uncertainties and what could change
+- Let the evidence speak for itself
+
+### Output Structure (for each vertical):
+
+---
+
+## [VERTICAL NAME]
+
+### Overview
+3-4 sentences. What is this vertical and what does it do? (Factual, no opinion)
+
+### Financial Performance (FROM JSON ONLY)
+- Q3 2025 revenue: $X (+Y% YoY)
+- Quarterly trajectory: Q1→Q2→Q3 trend (accelerating/stable/decelerating)
+- Margin: X% or "not disclosed"
+- Source: Cite which JSON field you used
+
+### Competitive Landscape (WEB SEARCH REQUIRED)
+- Market position: Leader/Challenger/Follower
+- Market share: X% (source: [publication], date: [when])
+- Key competitors and their recent moves
+- Competitive dynamics: What's changing in the market?
+- Moat characteristics: What advantages exist? Are they strengthening or weakening?
+
+### Recent Developments (last 60 days)
+List 3-5 key events with dates and sources. For each:
+- What happened
+- Factual impact on this vertical
+- Source (publication name)
+
+### Growth Dynamics
+**Tailwinds** (factors that could accelerate growth):
+- Tailwind 1: [magnitude: high/med/low] - evidence
+- Tailwind 2: [magnitude: high/med/low] - evidence
+
+**Headwinds** (factors that could slow growth):
+- Headwind 1: [magnitude: high/med/low] - evidence
+- Headwind 2: [magnitude: high/med/low] - evidence
+
+TAM estimate: $X (source)
+
+### Risk Factors
+For each risk, include ALL of: probability, impact, trigger, mitigant
+- **Risk 1**: [prob: H/M/L, impact: H/M/L]
+  - Trigger: What would cause this
+  - Mitigant: What reduces this risk
+
+### Key Uncertainties
+What questions remain unanswered that could materially affect this vertical?
+- Uncertainty 1: [what we don't know and why it matters]
+- Uncertainty 2: [what we don't know and why it matters]
+
+What metrics/events to watch:
+- If [X happens], it would suggest [positive/negative for growth]
+- If [Y happens], it would suggest [positive/negative for growth]
+
+### Research Quality
+- Data quality: good/limited/poor
+- Sources used: [list publications]
+- Gaps: [what we couldn't find or verify]
+
+---
+
+### At the end, add:
+
+## Cross-Vertical Observations for {group_name}
+- **Interconnections**: How do verticals in this group interact with each other?
+- **Shared exposures**: What factors affect multiple verticals?
+- **Key questions for synthesis**: What should the investment analyst consider when forming a view?
+
+## Web Searches Performed
+List all searches with: query, source found, date of source, key finding
+
+## CONFIDENCE CALIBRATION
+
+Your confidence score MUST reflect evidence quality:
+
+| Evidence Quality | Max Confidence |
+|------------------|----------------|
+| Multiple recent sources (< 60 days) agreeing | 0.9 |
+| Single authoritative source (SEC, company IR) | 0.8 |
+| Multiple news sources, some conflicting | 0.6 |
+| Single news source | 0.5 |
+| Analyst estimates only | 0.4 |
+| Training data / memory (no search) | 0.2 |
+| Speculation | 0.1 |
+
+If you claim confidence > 0.7, you must cite:
+- At least 2 sources
+- At least 1 source from last 60 days
+- Sources must agree on the key claim
+
+If your sources are thin, LOWER YOUR CONFIDENCE. Do not pretend certainty.
+
+## HARD RULES
+
+1. **JSON = FINANCIALS** - All revenue, growth, margin numbers come from JSON. Never use web search numbers for financials.
+
+2. **WEB SEARCH = CONTEXT** - Search for: market share, competitive moves, analyst views, recent news, industry trends. NOT for financials.
+
+3. **QUARTERLY DATA FIRST** - Q3 2025 > Q2 2025 > Q1 2025 >> FY2024. If you cite FY2024 as "current," you've failed.
+
+4. **ANSWER DISCOVERY'S QUESTIONS** - Each vertical came with research questions. Answer them explicitly.
+
+5. **CONFIDENCE = EVIDENCE** - High confidence requires multiple recent sources. No exceptions.
+
+6. **CITE DATES** - Every non-JSON claim needs a date. "Market share is 25%" means nothing without "as of Q3 2025 per [source]."
+
+7. **8K TOKENS MAX PER VERTICAL** - Be ruthless. Cut fluff. Keep analysis.
+
+8. **ADMIT GAPS** - If you can't find something, say so. List it in unanswered_questions. Don't fabricate."""
 
 
 class VerticalAnalystAgent(Agent):
-    """Stage 3: Vertical Analyst.
+    """Stage 3: Vertical Analyst (Deep Research).
 
     Responsible for:
-    1. Deep diving into a single research thread/vertical
+    1. Deep diving into a research group (multiple verticals)
     2. Analyzing competitive position and growth drivers
     3. Developing bull and bear cases
-    4. Using web search for recent information
+    4. Using OpenAI o4-mini Deep Research with web search
 
-    Uses o4-mini-deep-research for web-enhanced analysis.
+    Uses OpenAI o4-mini Deep Research for web-enhanced analysis.
+    Two instances run in parallel - one per research group.
     """
 
     def __init__(self, context: AgentContext) -> None:
@@ -159,7 +322,7 @@ class VerticalAnalystAgent(Agent):
 
     @property
     def role(self) -> str:
-        return "Deep dive analysis of a single vertical with web research"
+        return "Deep dive analysis of research groups with web research"
 
     async def _get_openai_client(self) -> OpenAIClient:
         """Get or create OpenAI client for Deep Research."""
@@ -169,90 +332,120 @@ class VerticalAnalystAgent(Agent):
             )
         return self._openai_client
 
-    async def run(
+    async def run_group(
         self,
         run_state: RunState,
         company_context: CompanyContext,
-        thread: DiscoveredThread,
+        research_group: ResearchGroup,
+        threads: list[DiscoveredThread],
         use_deep_research: bool = True,
+        other_groups: list[tuple[ResearchGroup, list[DiscoveredThread]]] | None = None,
         **kwargs: Any,
-    ) -> VerticalAnalysis:
-        """Execute Stage 3: Vertical Analysis for a single thread.
+    ) -> GroupResearchOutput:
+        """Execute Stage 3: Deep Research for a research group.
 
         Args:
             run_state: Current run state.
             company_context: CompanyContext from Stage 1.
-            thread: The research thread to analyze.
-            use_deep_research: Whether to use deep research (vs regular completion).
+            research_group: The research group to analyze.
+            threads: The threads/verticals within this group.
+            use_deep_research: Whether to use deep research.
+            other_groups: Other research groups being analyzed in parallel.
+                          List of (ResearchGroup, threads) tuples. Used for
+                          co-analyst coordination to avoid duplicate work.
 
         Returns:
-            VerticalAnalysis with deep dive results.
+            GroupResearchOutput with all vertical analyses.
         """
         self.log_info(
-            "Starting vertical analysis",
+            "Starting group research",
             ticker=run_state.ticker,
-            vertical=thread.name,
-            thread_id=thread.thread_id,
+            group=research_group.name,
+            vertical_count=len(threads),
             use_deep_research=use_deep_research,
         )
 
         run_state.phase = Phase.VERTICALS
 
-        # Build the prompt
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        research_questions = "\n".join(
-            f"- {q}" for q in thread.research_questions
-        )
+        # Build verticals detail section
+        verticals_detail = ""
+        for i, thread in enumerate(threads, 1):
+            questions = "\n".join(f"      - {q}" for q in thread.research_questions)
+            verticals_detail += f"""
+**Vertical {i}: {thread.name}**
+- Type: {thread.thread_type.value}
+- Priority: {thread.priority}
+- Description: {thread.description}
+- Hypothesis: {thread.value_driver_hypothesis}
+- Research Questions:
+{questions}
+"""
 
-        prompt = VERTICAL_ANALYST_PROMPT.format(
+        # Build other groups detail for co-analyst coordination
+        if other_groups:
+            other_groups_detail = ""
+            for other_group, other_threads in other_groups:
+                verticals_list = ", ".join(t.name for t in other_threads)
+                other_groups_detail += f"""
+**Group: {other_group.name}**
+- Theme: {other_group.theme}
+- Verticals: {verticals_list}
+"""
+        else:
+            other_groups_detail = "(No other groups - you are the only analyst)"
+
+        # Build the prompt
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        current_month = now.strftime("%B")
+        current_year = now.strftime("%Y")
+
+        prompt = DEEP_RESEARCH_PROMPT.format(
             date=today,
+            current_month=current_month,
+            current_year=current_year,
             ticker=company_context.symbol,
             company_name=company_context.company_name,
-            vertical_name=thread.name,
-            thread_type=thread.thread_type.value,
-            priority=thread.priority,
-            description=thread.description,
-            hypothesis=thread.value_driver_hypothesis,
-            research_questions=research_questions,
-            company_context=company_context.to_prompt_string(max_tokens=12000),
+            group_name=research_group.name,
+            group_theme=research_group.theme,
+            group_focus=research_group.focus,
+            verticals_detail=verticals_detail,
+            other_groups_detail=other_groups_detail,
+            company_context=company_context.to_prompt_string(max_tokens=15000),
         )
 
         # Get OpenAI client
-        openai = await self._get_openai_client()
+        openai_client = await self._get_openai_client()
 
         # Run analysis
         if use_deep_research:
-            # Use o4-mini-deep-research for web-enhanced analysis
             self.log_info(
-                "Using deep research",
+                "Using OpenAI o4-mini Deep Research",
                 ticker=run_state.ticker,
-                vertical=thread.name,
+                group=research_group.name,
             )
-            response = await openai.deep_research(
+            response = await openai_client.deep_research(
                 query=prompt,
-                system_message="You are a senior equity research analyst performing deep analysis on a single business vertical.",
-                poll_interval=10.0,
-                max_wait_seconds=600.0,
+                model="o4-mini-deep-research-2025-06-26",
+                poll_interval=15.0,
+                max_wait_seconds=900.0,  # 15 minutes max
             )
         else:
-            # Use regular GPT-5.2 with reasoning
+            # Use regular GPT with web search
             from er.llm.base import LLMRequest
 
             self.log_info(
-                "Using GPT-5.2 with reasoning",
+                "Using GPT-5.2 with web search",
                 ticker=run_state.ticker,
-                vertical=thread.name,
+                group=research_group.name,
             )
             request = LLMRequest(
-                messages=[
-                    {"role": "system", "content": "You are a senior equity research analyst."},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 model="gpt-5.2",
                 temperature=0.3,
-                max_tokens=8000,
+                max_tokens=32000,
             )
-            response = await openai.complete_with_reasoning(
+            response = await openai_client.complete_with_web_search(
                 request,
                 reasoning_effort="high",
             )
@@ -269,135 +462,205 @@ class VerticalAnalystAgent(Agent):
             )
 
         # Parse the response
-        vertical_analysis = self._parse_response(
+        group_output = self._parse_group_response(
             response.content,
-            thread,
+            research_group,
+            threads,
             company_context.evidence_ids,
         )
 
         self.log_info(
-            "Completed vertical analysis",
+            "Completed group research",
             ticker=run_state.ticker,
-            vertical=thread.name,
-            confidence=vertical_analysis.overall_confidence,
-            risk_count=len(vertical_analysis.key_risks),
+            group=research_group.name,
+            vertical_count=len(group_output.vertical_analyses),
+            overall_confidence=group_output.overall_confidence,
         )
 
-        return vertical_analysis
+        return group_output
 
-    def _parse_response(
+    def _parse_group_response(
         self,
         content: str,
-        thread: DiscoveredThread,
+        research_group: ResearchGroup,
+        threads: list[DiscoveredThread],
         base_evidence_ids: tuple[str, ...],
-    ) -> VerticalAnalysis:
-        """Parse the LLM response into VerticalAnalysis.
+    ) -> GroupResearchOutput:
+        """Parse the LLM prose response into GroupResearchOutput.
+
+        The Deep Research agent outputs structured markdown prose.
+        We extract key sections and store the full prose for synthesis.
 
         Args:
-            content: Raw LLM response.
-            thread: The research thread being analyzed.
+            content: Raw LLM response (markdown prose).
+            research_group: The research group.
+            threads: Threads in this group.
             base_evidence_ids: Evidence IDs from CompanyContext.
 
         Returns:
-            Parsed VerticalAnalysis.
+            Parsed GroupResearchOutput.
         """
-        # Try to extract JSON from the response
-        try:
-            # Find JSON block
-            if "```json" in content:
-                json_start = content.find("```json") + 7
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
-            elif "```" in content:
-                json_start = content.find("```") + 3
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
-            else:
-                # Try to find JSON object directly
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                json_str = content[start:end]
+        # Split content by vertical sections (## VERTICAL NAME)
+        vertical_sections = re.split(r'\n## (?=[A-Z])', content)
 
-            data = json.loads(json_str)
+        vertical_analyses = []
+        cross_vertical_section = ""
+        web_searches_section = ""
 
-        except (json.JSONDecodeError, ValueError) as e:
-            self.log_warning(f"Failed to parse JSON response: {e}")
-            # Return minimal output with error
+        for section in vertical_sections:
+            if not section.strip():
+                continue
+
+            # Check for special sections
+            if section.startswith("Cross-Vertical Insights") or section.startswith("cross-vertical"):
+                cross_vertical_section = section
+                continue
+            if section.startswith("Web Searches Performed") or section.startswith("web searches"):
+                web_searches_section = section
+                continue
+
+            # Extract vertical name (first line)
+            lines = section.strip().split('\n')
+            if not lines:
+                continue
+
+            v_name = lines[0].strip().strip('#').strip()
+            if not v_name or v_name.lower() in ['confidence calibration', 'hard rules', 'output requirements']:
+                continue
+
+            # Find matching thread
+            thread = None
+            for t in threads:
+                if t.name.lower() in v_name.lower() or v_name.lower() in t.name.lower():
+                    thread = t
+                    break
+            if not thread and threads:
+                # Try looser matching
+                for t in threads:
+                    if any(word in v_name.lower() for word in t.name.lower().split()):
+                        thread = t
+                        break
+            if not thread and threads:
+                thread = threads[0]  # Fallback
+
+            # Extract confidence if available
+            confidence = 0.5
+            conf_match = re.search(r'Confidence:\s*(\d+)/10', section)
+            if conf_match:
+                confidence = float(conf_match.group(1)) / 10
+
+            # Store full prose - that's all we need
+            vertical_analysis = VerticalAnalysis(
+                thread_id=thread.thread_id if thread else "",
+                vertical_name=v_name,
+                business_understanding=section,  # Full prose for synthesizer
+                evidence_ids=list(base_evidence_ids),
+                overall_confidence=confidence,
+            )
+            vertical_analyses.append(vertical_analysis)
+
+        # Extract cross-vertical insights
+        synergies = ""
+        shared_risks = ""
+        group_thesis = ""
+        if cross_vertical_section:
+            syn_match = re.search(r'\*\*Synergies\*\*:?\s*(.+?)(?=\*\*|\Z)', cross_vertical_section, re.DOTALL)
+            if syn_match:
+                synergies = syn_match.group(1).strip()
+            risk_match = re.search(r'\*\*Shared risks\*\*:?\s*(.+?)(?=\*\*|\Z)', cross_vertical_section, re.DOTALL)
+            if risk_match:
+                shared_risks = risk_match.group(1).strip()
+            thesis_match = re.search(r'\*\*Group thesis\*\*:?\s*(.+?)(?=\*\*|\Z)', cross_vertical_section, re.DOTALL)
+            if thesis_match:
+                group_thesis = thesis_match.group(1).strip()
+
+        # Calculate overall confidence
+        if vertical_analyses:
+            avg_confidence = sum(v.overall_confidence for v in vertical_analyses) / len(vertical_analyses)
+        else:
+            avg_confidence = 0.0
+
+        # If we got no verticals but have content, create one from full content
+        if not vertical_analyses and content.strip():
+            self.log_warning("Could not parse vertical sections, storing full response")
+            # Store full content as single analysis
+            if threads:
+                thread = threads[0]
+                vertical_analyses.append(
+                    VerticalAnalysis(
+                        thread_id=thread.thread_id,
+                        vertical_name=thread.name,
+                        business_understanding=content,  # Full prose
+                        evidence_ids=list(base_evidence_ids),
+                        overall_confidence=0.5,
+                    )
+                )
+
+        return GroupResearchOutput(
+            group_id=research_group.group_id,
+            group_name=research_group.name,
+            vertical_analyses=vertical_analyses,
+            synergies=synergies,
+            shared_risks=shared_risks,
+            group_thesis=group_thesis,
+            web_searches_performed=[],  # Prose format doesn't have structured search list
+            overall_confidence=avg_confidence,
+            data_gaps=[],
+            evidence_ids=list(base_evidence_ids),
+        )
+
+    # Keep legacy single-vertical method for backwards compatibility
+    async def run(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        thread: DiscoveredThread,
+        use_deep_research: bool = True,
+        **kwargs: Any,
+    ) -> VerticalAnalysis:
+        """Execute Stage 3: Vertical Analysis for a single thread (legacy).
+
+        For backwards compatibility. Wraps the thread in a group and runs.
+
+        Args:
+            run_state: Current run state.
+            company_context: CompanyContext from Stage 1.
+            thread: The research thread to analyze.
+            use_deep_research: Whether to use deep research.
+
+        Returns:
+            VerticalAnalysis with deep dive results.
+        """
+        # Create a synthetic group with just this thread
+        synthetic_group = ResearchGroup(
+            group_id=f"single_{thread.thread_id}",
+            name=thread.name,
+            theme=thread.description,
+            focus=thread.value_driver_hypothesis,
+            vertical_ids=[thread.thread_id],
+            key_questions=list(thread.research_questions),
+        )
+
+        group_output = await self.run_group(
+            run_state,
+            company_context,
+            synthetic_group,
+            [thread],
+            use_deep_research,
+        )
+
+        # Return the first (and only) vertical analysis
+        if group_output.vertical_analyses:
+            return group_output.vertical_analyses[0]
+        else:
+            # Return error analysis
             return VerticalAnalysis(
                 thread_id=thread.thread_id,
                 vertical_name=thread.name,
-                business_understanding="Failed to parse response",
-                competitive_position="",
-                growth_drivers=[],
-                key_risks=[],
-                bull_case=ThesisCase(
-                    thesis="",
-                    key_assumptions=[],
-                    key_metrics=[],
-                    catalysts=[],
-                    confidence=0.0,
-                ),
-                bear_case=ThesisCase(
-                    thesis="",
-                    key_assumptions=[],
-                    key_metrics=[],
-                    catalysts=[],
-                    confidence=0.0,
-                ),
+                business_understanding="Failed to analyze",
+                evidence_ids=list(company_context.evidence_ids),
                 overall_confidence=0.0,
-                confidence_drivers=["Parse error"],
-                unanswered_questions=["Failed to parse response"],
-                data_gaps=["Failed to parse response"],
-                evidence_ids=list(base_evidence_ids),
             )
-
-        # Parse risks
-        risks = []
-        for r in data.get("key_risks", []):
-            risks.append(
-                Risk(
-                    name=r.get("name", "Unknown"),
-                    description=r.get("description", ""),
-                    probability=r.get("probability", "medium"),
-                    impact=r.get("impact", "medium"),
-                    mitigants=r.get("mitigants", []),
-                )
-            )
-
-        # Parse thesis cases
-        bull_data = data.get("bull_case", {})
-        bull_case = ThesisCase(
-            thesis=bull_data.get("thesis", ""),
-            key_assumptions=bull_data.get("key_assumptions", []),
-            key_metrics=bull_data.get("key_metrics", []),
-            catalysts=bull_data.get("catalysts", []),
-            confidence=bull_data.get("confidence", 0.5),
-        )
-
-        bear_data = data.get("bear_case", {})
-        bear_case = ThesisCase(
-            thesis=bear_data.get("thesis", ""),
-            key_assumptions=bear_data.get("key_assumptions", []),
-            key_metrics=bear_data.get("key_metrics", []),
-            catalysts=bear_data.get("catalysts", []),
-            confidence=bear_data.get("confidence", 0.5),
-        )
-
-        return VerticalAnalysis(
-            thread_id=thread.thread_id,
-            vertical_name=thread.name,
-            business_understanding=data.get("business_understanding", ""),
-            competitive_position=data.get("competitive_position", ""),
-            growth_drivers=data.get("growth_drivers", []),
-            key_risks=risks,
-            bull_case=bull_case,
-            bear_case=bear_case,
-            overall_confidence=data.get("overall_confidence", 0.5),
-            confidence_drivers=data.get("confidence_drivers", []),
-            unanswered_questions=data.get("unanswered_questions", []),
-            data_gaps=data.get("data_gaps", []),
-            evidence_ids=list(base_evidence_ids),
-        )
 
     async def close(self) -> None:
         """Close any open clients."""

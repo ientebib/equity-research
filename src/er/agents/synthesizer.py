@@ -12,7 +12,6 @@ Models:
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,122 +22,212 @@ from er.llm.openai_client import OpenAIClient
 from er.types import (
     CompanyContext,
     DiscoveryOutput,
-    KeyDebate,
+    EditorialFeedback,
     Phase,
-    RiskFactor,
     RunState,
-    Scenario,
     SynthesisOutput,
     VerticalAnalysis,
 )
 
 
 # Synthesis prompt template
-SYNTHESIS_PROMPT = """You are a senior equity research synthesizer producing an investment thesis.
+SYNTHESIS_PROMPT = """You are a senior equity research synthesizer producing a comprehensive investment research report.
 
 TODAY'S DATE: {date}
 COMPANY: {ticker} ({company_name})
 
-## CRITICAL INSTRUCTION
-You have been given vertical analyses from multiple specialist analysts.
-Your job is to synthesize ALL inputs into a UNIFIED investment thesis.
-DO NOT rely on training data - use ONLY the provided analyses and data.
+## YOUR INPUT: Deep Research Analyses
 
-## CompanyContext (Ground Truth Data)
-{company_context}
+You have received detailed analyses from specialist Deep Research analysts who each focused on specific verticals/segments of the business. Each analyst had access to:
+- Full company financials (income statement, balance sheet, cash flow)
+- Segment revenue breakdowns
+- Recent news and developments
+- Web search for competitive intelligence
 
-## Discovery Insights
-Official Segments: {official_segments}
-Cross-Cutting Themes: {cross_cutting_themes}
-Optionality Candidates: {optionality_candidates}
+Your job is to SYNTHESIZE their work into a unified, comprehensive research report. Do NOT summarize or compress - PRESERVE the nuance and detail from their analyses while adding cross-vertical insights.
 
-## Vertical Analyses
+## Deep Research Analyst Reports
+
 {vertical_analyses}
 
-## Your Task: Unified Synthesis
+## YOUR TASK: Full Investment Research Report
 
-### 1. Investment View
-Form a clear BUY/HOLD/SELL recommendation with conviction level (high/medium/low).
-Justify your view with specific evidence from the vertical analyses.
+Write a comprehensive equity research report (~15,000-20,000 words). This is the final deliverable for portfolio managers.
 
-### 2. Thesis Summary
-Write a 3-4 sentence summary of the investment thesis that a portfolio manager could read in 30 seconds.
+### Required Sections:
 
-### 3. Scenarios
-Develop bull, base, and bear cases:
-- What assumptions drive each scenario?
-- What's the probability you assign to each?
-- What would prove or disprove each case?
+---
 
-### 4. Key Debates
-Where do the vertical analyses conflict or highlight uncertainty?
-What are the most important questions for the investment case?
-For each debate, give bull view, bear view, and YOUR view.
+# {ticker} EQUITY RESEARCH REPORT
+*Generated: {date}*
 
-### 5. Risk Assessment
-What are the top 5 risks? Rank by probability × impact.
-Which risks are priced in vs. underappreciated?
+## EXECUTIVE SUMMARY
+- Investment View: BUY / HOLD / SELL
+- Conviction: High / Medium / Low
+- 1-paragraph thesis (what's the core investment case?)
 
-## Output Requirements
+## COMPANY OVERVIEW
+Synthesize what this company does across all verticals. How do the pieces fit together? What's the corporate strategy?
 
-You MUST output valid JSON with this exact structure:
+## SEGMENT ANALYSIS
+
+For EACH vertical from the Deep Research reports:
+- Preserve the key insights (don't compress)
+- Add cross-references to other segments where relevant
+- Highlight any conflicts or tensions between segments
+
+### [Segment 1 Name]
+[Full analysis preserving Deep Research insights]
+
+### [Segment 2 Name]
+[Full analysis preserving Deep Research insights]
+
+[Continue for all segments...]
+
+## CROSS-VERTICAL DYNAMICS
+This is YOUR unique contribution - insights the individual analysts couldn't see:
+- How do segments interact? (e.g., cannibalization, synergies, shared costs)
+- Internal tensions (e.g., competing for same resources, conflicting strategies)
+- Portfolio effects (e.g., diversification benefits, concentration risks)
+
+## COMPETITIVE POSITION
+Synthesize competitive insights across all verticals:
+- Overall market position
+- Key competitors by segment
+- Moat assessment (strengthening or weakening?)
+
+## INVESTMENT THESIS
+
+### Bull Case (probability: X%)
+- Key assumptions
+- What has to go right
+- Catalysts to watch
+- Proof points that would confirm
+
+### Base Case (probability: X%)
+- Key assumptions
+- Expected trajectory
+- Key metrics to monitor
+
+### Bear Case (probability: X%)
+- Key assumptions
+- What has to go wrong
+- Warning signs to watch
+- What would trigger downgrade
+
+## KEY DEBATES & UNCERTAINTIES
+Where the analyses conflict or highlight uncertainty:
+For each debate:
+- **The Question**: What's being debated?
+- **Bull View**: The optimistic interpretation
+- **Bear View**: The pessimistic interpretation
+- **Our View**: Your synthesized assessment and why
+
+## RISK ASSESSMENT
+Top risks ranked by (probability × impact):
+For each risk:
+- Description
+- Probability: High/Medium/Low
+- Impact: High/Medium/Low
+- Priced In?: Yes/No/Partially
+- Mitigants
+- Trigger events to watch
+
+## UNANSWERED QUESTIONS
+What couldn't the analysts determine? What data gaps remain?
+
+## CONCLUSION
+Final investment view with confidence level and key monitoring points.
+
+---
+
+## OUTPUT FORMAT
+
+Write the full report in markdown prose FIRST (this is the main deliverable).
+
+THEN, at the very end, include a JSON block with structured metadata:
 
 ```json
 {{
   "investment_view": "BUY|HOLD|SELL",
   "conviction": "high|medium|low",
-  "thesis_summary": "3-4 sentence summary",
+  "thesis_summary": "1-2 sentence summary",
   "scenarios": {{
-    "bull": {{
-      "name": "bull",
-      "probability": 0.25,
-      "narrative": "Bull case narrative",
-      "key_assumptions": ["Assumption 1", "Assumption 2"]
-    }},
-    "base": {{
-      "name": "base",
-      "probability": 0.50,
-      "narrative": "Base case narrative",
-      "key_assumptions": ["Assumption 1", "Assumption 2"]
-    }},
-    "bear": {{
-      "name": "bear",
-      "probability": 0.25,
-      "narrative": "Bear case narrative",
-      "key_assumptions": ["Assumption 1", "Assumption 2"]
-    }}
+    "bull": {{"probability": 0.XX, "headline": "..."}},
+    "base": {{"probability": 0.XX, "headline": "..."}},
+    "bear": {{"probability": 0.XX, "headline": "..."}}
   }},
-  "key_debates": [
-    {{
-      "topic": "Debate topic",
-      "bull_view": "The bullish perspective",
-      "bear_view": "The bearish perspective",
-      "our_view": "Your synthesized view"
-    }}
-  ],
-  "risk_factors": [
-    {{
-      "name": "Risk name",
-      "description": "What the risk is",
-      "probability": "high|medium|low",
-      "impact": "high|medium|low",
-      "priced_in": true,
-      "mitigation": "What could mitigate this"
-    }}
-  ],
-  "overall_confidence": 0.7,
-  "evidence_gaps": ["What we don't know"]
+  "top_risks": ["risk1", "risk2", "risk3"],
+  "key_debates": ["debate1", "debate2"],
+  "overall_confidence": 0.X,
+  "evidence_gaps": ["gap1", "gap2"]
 }}
 ```
 
-## Hard Rules
+## HARD RULES
 
-1. NO CLAIMS WITHOUT EVIDENCE - synthesize from provided analyses only
-2. Scenarios must sum to ~1.0 probability
-3. Every debate must have bull_view, bear_view, AND our_view
-4. Risks should be ranked by probability × impact
-5. Flag confidence < 0.5 if key inputs are conflicting or thin
-6. DO NOT produce a DCF - this is qualitative analysis only
+1. **PRESERVE NUANCE** - Do not compress the Deep Research analyses. Your report should be 15-20K tokens, not 3K.
+2. **CROSS-REFERENCE** - Your unique value is seeing connections between verticals. Add these insights.
+3. **NO NEW RESEARCH** - Synthesize what the analysts provided. Don't invent new facts.
+4. **CITE SOURCES** - When referencing specific data points, note which analyst report it came from.
+5. **SCENARIOS SUM TO 1.0** - Bull + Base + Bear probabilities must total ~100%.
+6. **NO DCF** - This is qualitative analysis only for V1.
+7. **BE SPECIFIC** - Not "growth could slow" but "if Cloud growth drops below 20% YoY".
+"""
+
+
+# Revision prompt for incorporating Judge feedback
+REVISION_PROMPT = """You are revising your equity research report based on editorial feedback from a senior editor.
+
+## TODAY'S DATE: {date}
+## COMPANY: {ticker}
+
+## YOUR ORIGINAL REPORT
+
+{original_report}
+
+## EDITORIAL FEEDBACK FROM SENIOR EDITOR
+
+The editor reviewed both your report and an alternative synthesis. They selected YOUR report as the stronger one, but have provided feedback to make it even better.
+
+### What to incorporate from the other report:
+{incorporate_from_other}
+
+### Errors to fix:
+{errors_to_fix}
+
+### Gaps to address:
+{gaps_to_address}
+
+### Detailed revision instructions:
+{revision_instructions}
+
+### Confidence adjustment:
+Current confidence: {current_confidence}
+Recommended confidence: {recommended_confidence}
+Reasoning: {confidence_reasoning}
+
+## YOUR TASK
+
+Revise your report incorporating the editor's feedback. You should:
+
+1. **PRESERVE your core thesis and reasoning** - The editor selected your report because your analysis was strong. Don't abandon your reasoning.
+
+2. **INCORPORATE the specific improvements** - Add the insights from the other report (quoted above), fix the errors, address the gaps.
+
+3. **MAINTAIN your voice and structure** - This is still YOUR report. Don't rewrite it from scratch.
+
+4. **UPDATE the JSON metadata** at the end if the feedback affects investment view, conviction, or confidence.
+
+5. **KEEP THE FULL LENGTH** - Don't compress. The revised report should be similar length to the original (~15-20K words).
+
+## OUTPUT
+
+Output your REVISED full report in the same format as before:
+- Full prose research report (main content)
+- JSON metadata block at the end (```json ... ```)
+
+The report should be improved but recognizably yours.
 """
 
 
@@ -216,35 +305,87 @@ class SynthesizerAgent(Agent):
             vertical_count=len(vertical_analyses),
         )
 
-        run_state.phase = Phase.SYNTHESIS
+        run_state.phase = Phase.SYNTHESIZE
 
         # Build the shared prompt
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        # Format vertical analyses
+        # Format vertical analyses - these contain full prose from Deep Research
         vertical_str = self._format_vertical_analyses(vertical_analyses)
 
+        # Note: We don't pass CompanyContext here because Deep Research already
+        # incorporated all that data into their analyses. Passing it again would
+        # be redundant and waste tokens.
         prompt = SYNTHESIS_PROMPT.format(
             date=today,
             ticker=company_context.symbol,
             company_name=company_context.company_name,
-            company_context=company_context.to_prompt_string(max_tokens=10000),
-            official_segments=", ".join(discovery_output.official_segments),
-            cross_cutting_themes=", ".join(discovery_output.cross_cutting_themes),
-            optionality_candidates=", ".join(discovery_output.optionality_candidates),
             vertical_analyses=vertical_str,
         )
 
-        # Run both syntheses in parallel
+        # Run both syntheses in parallel, save each as it completes
         self.log_info("Running Claude and GPT syntheses in parallel", ticker=run_state.ticker)
 
-        claude_task = self._run_claude_synthesis(prompt, company_context)
-        gpt_task = self._run_gpt_synthesis(prompt, company_context)
+        import json
+        from pathlib import Path
 
-        claude_synthesis, gpt_synthesis = await asyncio.gather(
-            claude_task,
-            gpt_task,
-        )
+        claude_task = asyncio.create_task(self._run_claude_synthesis(prompt, company_context))
+        gpt_task = asyncio.create_task(self._run_gpt_synthesis(prompt, company_context))
+
+        claude_synthesis = None
+        gpt_synthesis = None
+
+        # Get output_dir from kwargs (passed by pipeline)
+        output_dir = kwargs.get("output_dir")
+        if output_dir is None:
+            output_dir = Path(f"output/{run_state.run_id}")
+        else:
+            output_dir = Path(output_dir)
+
+        # Wait for tasks and save as each completes
+        pending = {claude_task, gpt_task}
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                try:
+                    result = task.result()
+                    if task == claude_task:
+                        claude_synthesis = result
+                        self.log_info("Claude synthesis completed, saving immediately")
+                        # Save Claude synthesis immediately
+                        claude_file = output_dir / "stage4_claude_synthesis.json"
+                        claude_file.write_text(json.dumps({
+                            "full_report": result.full_report,
+                            "investment_view": result.investment_view,
+                            "conviction": result.conviction,
+                            "overall_confidence": result.overall_confidence,
+                            "thesis_summary": result.thesis_summary,
+                            "synthesizer_model": result.synthesizer_model,
+                        }, indent=2))
+                    else:
+                        gpt_synthesis = result
+                        self.log_info("GPT synthesis completed, saving immediately")
+                        # Save GPT synthesis immediately
+                        gpt_file = output_dir / "stage4_gpt_synthesis.json"
+                        gpt_file.write_text(json.dumps({
+                            "full_report": result.full_report,
+                            "investment_view": result.investment_view,
+                            "conviction": result.conviction,
+                            "overall_confidence": result.overall_confidence,
+                            "thesis_summary": result.thesis_summary,
+                            "synthesizer_model": result.synthesizer_model,
+                        }, indent=2))
+                except Exception as e:
+                    if task == claude_task:
+                        self.log_error("Claude synthesis failed", error=str(e))
+                        raise e
+                    else:
+                        self.log_warning("GPT synthesis failed, will use Claude for both", error=str(e))
+
+        # If GPT failed, use Claude for both
+        if gpt_synthesis is None:
+            gpt_synthesis = claude_synthesis
 
         # Update run state
         run_state.synthesis_outputs = {
@@ -273,34 +414,24 @@ class SynthesizerAgent(Agent):
         self,
         analyses: list[VerticalAnalysis],
     ) -> str:
-        """Format vertical analyses for the prompt."""
+        """Format vertical analyses for the prompt.
+
+        Deep Research now outputs full prose analysis stored in business_understanding.
+        We pass through the full prose to preserve all the nuanced analysis.
+        """
         sections = []
         for analysis in analyses:
+            # business_understanding contains the FULL prose analysis from Deep Research
+            # It already has sections for Executive Summary, Competitive Position, etc.
+            # Just pass it through with a header
             sections.append(f"""
-### {analysis.vertical_name}
+---
+## Vertical: {analysis.vertical_name}
+---
 
-**Business Understanding:**
 {analysis.business_understanding}
 
-**Competitive Position:**
-{analysis.competitive_position}
-
-**Growth Drivers:**
-{chr(10).join(f"- {d}" for d in analysis.growth_drivers)}
-
-**Key Risks:**
-{chr(10).join(f"- {r.name}: {r.description}" for r in analysis.key_risks)}
-
-**Bull Case:**
-{analysis.bull_case.thesis}
-Key Assumptions: {", ".join(analysis.bull_case.key_assumptions)}
-
-**Bear Case:**
-{analysis.bear_case.thesis}
-Key Assumptions: {", ".join(analysis.bear_case.key_assumptions)}
-
-**Confidence:** {analysis.overall_confidence:.0%}
-**Unanswered Questions:** {", ".join(analysis.unanswered_questions) if analysis.unanswered_questions else "None"}
+**Analysis Confidence:** {analysis.overall_confidence:.0%}
 """)
         return "\n".join(sections)
 
@@ -316,16 +447,16 @@ Key Assumptions: {", ".join(analysis.bear_case.key_assumptions)}
 
         request = LLMRequest(
             messages=[
-                {"role": "system", "content": "You are a senior equity research analyst synthesizing investment insights."},
+                {"role": "system", "content": "You are a senior equity research analyst producing comprehensive investment research reports."},
                 {"role": "user", "content": prompt},
             ],
             model="claude-opus-4-5-20251101",
-            max_tokens=16000,
+            max_tokens=32000,  # Allow 20K+ output for full research report
         )
 
         response = await anthropic.complete_with_thinking(
             request,
-            budget_tokens=15000,
+            budget_tokens=20000,  # More thinking budget for complex synthesis
         )
 
         # Record cost
@@ -362,16 +493,16 @@ Key Assumptions: {", ".join(analysis.bear_case.key_assumptions)}
 
         request = LLMRequest(
             messages=[
-                {"role": "system", "content": "You are a senior equity research analyst synthesizing investment insights."},
+                {"role": "system", "content": "You are a senior equity research analyst producing comprehensive investment research reports."},
                 {"role": "user", "content": prompt},
             ],
             model="gpt-5.2",
-            max_tokens=8000,
+            max_tokens=32000,  # Allow 20K+ output for full research report
         )
 
         response = await openai.complete_with_reasoning(
             request,
-            reasoning_effort="xhigh",
+            reasoning_effort="medium",  # Use medium to avoid timeouts
         )
 
         # Record cost
@@ -402,91 +533,229 @@ Key Assumptions: {", ".join(analysis.bear_case.key_assumptions)}
         synthesizer_model: str,
         base_evidence_ids: tuple[str, ...],
     ) -> SynthesisOutput:
-        """Parse the LLM response into SynthesisOutput."""
-        # Try to extract JSON from the response
-        try:
-            # Find JSON block
-            if "```json" in content:
-                json_start = content.find("```json") + 7
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
-            elif "```" in content:
-                json_start = content.find("```") + 3
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
-            else:
-                # Try to find JSON object directly
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                json_str = content[start:end]
+        """Parse the LLM response into SynthesisOutput.
 
-            data = json.loads(json_str)
+        Extracts investment_view, conviction, confidence, and thesis_summary from the JSON block.
+        """
+        import json
+        import re
 
-        except (json.JSONDecodeError, ValueError) as e:
-            self.log_warning(f"Failed to parse JSON response: {e}")
-            # Return minimal output with error
-            return SynthesisOutput(
-                investment_view="HOLD",
-                conviction="low",
-                thesis_summary="Failed to parse synthesis response",
-                scenarios={},
-                key_debates=[],
-                risk_factors=[],
-                overall_confidence=0.0,
-                evidence_gaps=["Parse error"],
-                evidence_ids=list(base_evidence_ids),
-                synthesizer_model=synthesizer_model,
-            )
+        investment_view = "HOLD"
+        conviction = "medium"
+        overall_confidence = 0.5
+        thesis_summary = ""
 
-        # Parse scenarios
-        scenarios = {}
-        for name in ["bull", "base", "bear"]:
-            s_data = data.get("scenarios", {}).get(name, {})
-            scenarios[name] = Scenario(
-                name=name,
-                probability=s_data.get("probability", 0.33),
-                narrative=s_data.get("narrative", ""),
-                key_assumptions=s_data.get("key_assumptions", []),
-            )
-
-        # Parse key debates
-        key_debates = []
-        for d in data.get("key_debates", []):
-            key_debates.append(
-                KeyDebate(
-                    topic=d.get("topic", ""),
-                    bull_view=d.get("bull_view", ""),
-                    bear_view=d.get("bear_view", ""),
-                    our_view=d.get("our_view", ""),
-                )
-            )
-
-        # Parse risk factors
-        risk_factors = []
-        for r in data.get("risk_factors", []):
-            risk_factors.append(
-                RiskFactor(
-                    name=r.get("name", ""),
-                    description=r.get("description", ""),
-                    probability=r.get("probability", "medium"),
-                    impact=r.get("impact", "medium"),
-                    priced_in=r.get("priced_in", False),
-                    mitigation=r.get("mitigation", ""),
-                )
-            )
+        # Try to extract JSON block from the end of the response
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if json_match:
+            try:
+                metadata = json.loads(json_match.group(1))
+                investment_view = metadata.get("investment_view", "HOLD").upper()
+                conviction = metadata.get("conviction", "medium").lower()
+                overall_confidence = float(metadata.get("overall_confidence", 0.5))
+                thesis_summary = metadata.get("thesis_summary", "")
+            except (json.JSONDecodeError, ValueError):
+                self.log_warning("Failed to parse JSON metadata from synthesis response")
 
         return SynthesisOutput(
-            investment_view=data.get("investment_view", "HOLD"),
-            conviction=data.get("conviction", "medium"),
-            thesis_summary=data.get("thesis_summary", ""),
-            scenarios=scenarios,
-            key_debates=key_debates,
-            risk_factors=risk_factors,
-            overall_confidence=data.get("overall_confidence", 0.5),
-            evidence_gaps=data.get("evidence_gaps", []),
-            evidence_ids=list(base_evidence_ids),
+            full_report=content,
+            investment_view=investment_view,
+            conviction=conviction,
+            overall_confidence=overall_confidence,
+            thesis_summary=thesis_summary,
             synthesizer_model=synthesizer_model,
+            evidence_ids=list(base_evidence_ids),
         )
+
+    async def revise(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        original_synthesis: SynthesisOutput,
+        feedback: EditorialFeedback,
+    ) -> SynthesisOutput:
+        """Revise a synthesis report based on Judge editorial feedback.
+
+        Args:
+            run_state: Current run state.
+            company_context: CompanyContext from Stage 1.
+            original_synthesis: The original SynthesisOutput to revise.
+            feedback: EditorialFeedback from the Judge.
+
+        Returns:
+            Revised SynthesisOutput with incorporated feedback.
+        """
+        self.log_info(
+            "Starting synthesis revision",
+            ticker=run_state.ticker,
+            original_model=original_synthesis.synthesizer_model,
+            insights_to_incorporate=len(feedback.incorporate_from_other),
+            errors_to_fix=len(feedback.errors_to_fix),
+            gaps_to_address=len(feedback.gaps_to_address),
+        )
+
+        # Format the feedback sections
+        incorporate_str = self._format_incorporate_feedback(feedback.incorporate_from_other)
+        errors_str = self._format_errors_feedback(feedback.errors_to_fix)
+        gaps_str = self._format_gaps_feedback(feedback.gaps_to_address)
+
+        # Build the revision prompt
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prompt = REVISION_PROMPT.format(
+            date=today,
+            ticker=company_context.symbol,
+            original_report=original_synthesis.full_report,
+            incorporate_from_other=incorporate_str,
+            errors_to_fix=errors_str,
+            gaps_to_address=gaps_str,
+            revision_instructions=feedback.revision_instructions,
+            current_confidence=f"{feedback.current_confidence:.0%}",
+            recommended_confidence=f"{feedback.recommended_confidence:.0%}",
+            confidence_reasoning=feedback.confidence_reasoning,
+        )
+
+        # Use the same model that produced the original synthesis
+        if original_synthesis.synthesizer_model == "claude":
+            revised = await self._run_claude_revision(prompt, company_context)
+        else:
+            revised = await self._run_gpt_revision(prompt, company_context)
+
+        self.log_info(
+            "Completed synthesis revision",
+            ticker=run_state.ticker,
+            revised_view=revised.investment_view,
+            revised_confidence=revised.overall_confidence,
+            revised_report_len=len(revised.full_report),
+        )
+
+        return revised
+
+    def _format_incorporate_feedback(self, items: list) -> str:
+        """Format insights to incorporate from other synthesis."""
+        if not items:
+            return "No additional insights to incorporate."
+
+        lines = []
+        for i, item in enumerate(items, 1):
+            lines.append(f"""
+**{i}. From section: {item.section}**
+
+> {item.what_to_incorporate}
+
+*Why:* {item.why}
+*How to integrate:* {item.how_to_integrate}
+""")
+        return "\n".join(lines)
+
+    def _format_errors_feedback(self, items: list) -> str:
+        """Format errors to fix."""
+        if not items:
+            return "No errors identified."
+
+        lines = []
+        for i, item in enumerate(items, 1):
+            lines.append(f"""
+**{i}. Location:** {item.location}
+- **Error:** {item.error}
+- **Correction:** {item.correction}
+""")
+        return "\n".join(lines)
+
+    def _format_gaps_feedback(self, items: list) -> str:
+        """Format gaps to address."""
+        if not items:
+            return "No gaps identified."
+
+        lines = []
+        for i, item in enumerate(items, 1):
+            lines.append(f"""
+**{i}. Missing:** {item.missing}
+- **Why important:** {item.why_important}
+- **Suggestion:** {item.suggestion}
+""")
+        return "\n".join(lines)
+
+    async def _run_claude_revision(
+        self,
+        prompt: str,
+        company_context: CompanyContext,
+    ) -> SynthesisOutput:
+        """Run Claude revision of the synthesis report."""
+        self.log_info("Starting Claude revision")
+
+        anthropic = await self._get_anthropic_client()
+
+        request = LLMRequest(
+            messages=[
+                {"role": "system", "content": "You are revising your equity research report based on editorial feedback. Preserve your core thesis while incorporating the improvements."},
+                {"role": "user", "content": prompt},
+            ],
+            model="claude-opus-4-5-20251101",
+            max_tokens=32000,
+        )
+
+        response = await anthropic.complete_with_thinking(
+            request,
+            budget_tokens=15000,
+        )
+
+        if self.budget_tracker:
+            self.budget_tracker.record_usage(
+                provider="anthropic",
+                model=response.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                agent=self.name,
+                phase="revision_claude",
+            )
+
+        self.log_info(
+            "Completed Claude revision",
+            thinking_tokens=response.metadata.get("thinking_tokens") if response.metadata else 0,
+        )
+
+        return self._parse_response(response.content, "claude", company_context.evidence_ids)
+
+    async def _run_gpt_revision(
+        self,
+        prompt: str,
+        company_context: CompanyContext,
+    ) -> SynthesisOutput:
+        """Run GPT revision of the synthesis report."""
+        self.log_info("Starting GPT revision")
+
+        openai = await self._get_openai_client()
+
+        request = LLMRequest(
+            messages=[
+                {"role": "system", "content": "You are revising your equity research report based on editorial feedback. Preserve your core thesis while incorporating the improvements."},
+                {"role": "user", "content": prompt},
+            ],
+            model="gpt-5.2",
+            max_tokens=32000,
+        )
+
+        response = await openai.complete_with_reasoning(
+            request,
+            reasoning_effort="high",
+        )
+
+        if self.budget_tracker:
+            self.budget_tracker.record_usage(
+                provider="openai",
+                model=response.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                agent=self.name,
+                phase="revision_gpt",
+            )
+
+        self.log_info(
+            "Completed GPT revision",
+            reasoning_tokens=response.metadata.get("reasoning_tokens") if response.metadata else 0,
+        )
+
+        return self._parse_response(response.content, "gpt", company_context.evidence_ids)
 
     async def close(self) -> None:
         """Close any open clients."""
