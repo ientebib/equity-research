@@ -7,6 +7,5 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #33 | 3:25 PM | 🔴 | Fixed External Discovery Agent cleanup to close WebResearchService instead of AnthropicClient | ~397 |
 | #29 | 3:22 PM | 🔄 | Refactored External Discovery Agent to use evidence-first architecture | ~459 |
 </claude-mem-context>
