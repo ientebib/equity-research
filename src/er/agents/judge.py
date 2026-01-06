@@ -38,6 +38,8 @@ from er.types import (
     Phase,
     RunState,
     SynthesisOutput,
+    VerifiedResearchPackage,
+    VerificationStatus,
 )
 
 
@@ -67,6 +69,18 @@ You are an editor, not an author.
 ## GPT SYNTHESIS REPORT
 
 {gpt_synthesis}
+
+## KEY FINANCIAL DATA (For Fact-Checking Claims)
+
+Use this actual data to validate numerical claims in both reports:
+
+{key_metrics}
+
+## VERIFIED FACTS (For Citation Checking)
+
+The research team verified these facts. Check if reports cite them properly:
+
+{verified_facts_section}
 
 ## YOUR ANALYSIS PROCESS
 
@@ -106,8 +120,9 @@ This is your main output - make it detailed and useful.
 
 ```json
 {{
-  "preferred_synthesis": "claude|gpt",
+  "preferred_synthesis": "claude|gpt|reject_both",
   "preference_reasoning": "2-3 sentences explaining why this report is stronger overall",
+  "rejection_reason": "Only if reject_both: Why both reports are unacceptable and what the re-synthesis should fix",
 
   "overall_quality_assessment": {{
     "claude_score": 0.0,
@@ -169,22 +184,29 @@ This is your main output - make it detailed and useful.
 
 1. **YOU ARE AN EDITOR, NOT AN AUTHOR** - Your job is to guide the Synthesizer, not write the final report yourself.
 
-2. **QUOTE, DON'T SUMMARIZE** - When extracting insights from the other report, QUOTE the actual text verbatim.
+2. **REJECT_BOTH OPTION** - Use "reject_both" ONLY when BOTH reports have fundamental flaws that can't be fixed with simple revisions:
+   - Factually incorrect core claims (check against KEY FINANCIAL DATA above)
+   - Internally contradictory investment thesis
+   - Missing critical analysis (no risk assessment, no valuation, no thesis)
+   - Both scores below 0.5
+   When rejecting both, provide clear `rejection_reason` explaining what the re-synthesis must fix.
+
+3. **QUOTE, DON'T SUMMARIZE** - When extracting insights from the other report, QUOTE the actual text verbatim.
    The Synthesizer needs the exact language to incorporate the insight without losing nuance.
    BAD: "GPT had a good point about regulatory risk"
    GOOD: "GPT wrote: 'The DOJ antitrust case represents an underappreciated tail risk. If the court mandates structural remedies, the advertising business could face...' - incorporate this in your Risk Assessment section."
 
-3. **BE SPECIFIC** - Not "improve the risk section" but "add the regulatory risk analysis from GPT's report (quoted above) after your current risk #3."
+4. **BE SPECIFIC** - Not "improve the risk section" but "add the regulatory risk analysis from GPT's report (quoted above) after your current risk #3."
 
-4. **TRANSFER BRILLIANCE** - Both reports may have unique brilliant insights. Your job is to ensure the winner's report includes the best of BOTH. Don't let good insights die with the losing report.
+5. **TRANSFER BRILLIANCE** - Both reports may have unique brilliant insights. Your job is to ensure the winner's report includes the best of BOTH. Don't let good insights die with the losing report.
 
-5. **PRIORITIZE** - Focus on what matters most. 3-5 key improvements, not 50 minor edits.
+6. **PRIORITIZE** - Focus on what matters most. 3-5 key improvements, not 50 minor edits.
 
-6. **PRESERVE THE THESIS** - Don't ask the Synthesizer to flip their investment view unless there's a critical error. The Synthesizer developed their thesis through reasoning - respect that.
+7. **PRESERVE THE THESIS** - Don't ask the Synthesizer to flip their investment view unless there's a critical error. The Synthesizer developed their thesis through reasoning - respect that.
 
-7. **ACKNOWLEDGE UNCERTAINTY** - If evidence is thin, recommend lowering confidence rather than fabricating certainty.
+8. **ACKNOWLEDGE UNCERTAINTY** - If evidence is thin, recommend lowering confidence rather than fabricating certainty.
 
-8. **THINK ADVERSARIALLY** - What would a skeptic challenge? Ensure the final report addresses likely pushback.
+9. **THINK ADVERSARIALLY** - What would a skeptic challenge? Ensure the final report addresses likely pushback.
 
 Output ONLY the JSON. No preamble."""
 
@@ -287,6 +309,7 @@ class JudgeAgent(Agent):
         company_context: CompanyContext,
         claude_synthesis: SynthesisOutput,
         gpt_synthesis: SynthesisOutput,
+        verified_package: VerifiedResearchPackage | None = None,
         **kwargs: Any,
     ) -> EditorialFeedback:
         """Execute Stage 5: Editorial Review.
@@ -299,6 +322,7 @@ class JudgeAgent(Agent):
             company_context: CompanyContext from Stage 1.
             claude_synthesis: Synthesis from Claude (Stage 4) with full_report.
             gpt_synthesis: Synthesis from GPT (Stage 4) with full_report.
+            verified_package: Optional VerifiedResearchPackage for citation checking.
 
         Returns:
             EditorialFeedback with revision instructions.
@@ -310,6 +334,7 @@ class JudgeAgent(Agent):
             claude_report_len=len(claude_synthesis.full_report),
             gpt_view=gpt_synthesis.investment_view,
             gpt_report_len=len(gpt_synthesis.full_report),
+            has_verified_package=verified_package is not None,
         )
 
         run_state.phase = Phase.DELIBERATE
@@ -317,10 +342,18 @@ class JudgeAgent(Agent):
         # Build the prompt with FULL REPORTS (not JSON summaries)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+        # Get key metrics for fact-checking claims
+        key_metrics = company_context.for_judge()
+
+        # Format verified facts for citation checking
+        verified_facts_section = self._format_verified_facts_for_judge(verified_package)
+
         prompt = JUDGE_PROMPT.format(
             date=today,
             claude_synthesis=claude_synthesis.full_report,
             gpt_synthesis=gpt_synthesis.full_report,
+            key_metrics=key_metrics,
+            verified_facts_section=verified_facts_section,
         )
 
         # Get Anthropic client
@@ -336,14 +369,15 @@ class JudgeAgent(Agent):
                 {"role": "user", "content": prompt},
             ],
             model="claude-opus-4-5-20251101",
-            max_tokens=16000,  # Feedback doesn't need to be as long as the reports
+            # Note: max_tokens is computed by complete_with_thinking from budget + expected output
         )
 
         self.log_info("Calling Claude for editorial review...")
 
         response = await anthropic.complete_with_thinking(
             request,
-            budget_tokens=20000,
+            budget_tokens=16000,  # Good thinking budget for comparative analysis
+            expected_output_tokens=10000,  # Editorial feedback is shorter than full reports
         )
 
         # Record cost
@@ -387,6 +421,58 @@ class JudgeAgent(Agent):
         )
 
         return feedback
+
+    def _format_verified_facts_for_judge(
+        self,
+        package: VerifiedResearchPackage | None,
+    ) -> str:
+        """Format verified facts for the Judge to check citations.
+
+        Args:
+            package: VerifiedResearchPackage from verification stage.
+
+        Returns:
+            Formatted string for the Judge prompt.
+        """
+        if not package or not package.all_verified_facts:
+            return "(No verified facts available for citation checking)"
+
+        lines = []
+
+        # Verified facts that should be cited
+        verified = [
+            vf for vf in package.all_verified_facts
+            if vf.status == VerificationStatus.VERIFIED
+        ]
+        if verified:
+            lines.append("### Facts that SHOULD be cited:")
+            for vf in verified[:10]:  # Top 10
+                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+
+        # Contradicted facts that should NOT be used
+        contradicted = [
+            vf for vf in package.all_verified_facts
+            if vf.status == VerificationStatus.CONTRADICTED
+        ]
+        if contradicted:
+            lines.append("\n### Facts that should NOT be used (contradicted):")
+            for vf in contradicted:
+                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+                lines.append(f"  CONTRADICTION: {vf.verification_notes}")
+
+        # Critical issues to check for
+        if package.critical_issues:
+            lines.append("\n### Critical issues to verify addressed:")
+            for issue in package.critical_issues[:5]:
+                lines.append(f"- {issue}")
+
+        # Citation check instructions
+        lines.append("\n### Citation Check:")
+        lines.append("- Reports SHOULD cite evidence IDs in brackets [ev_xxxx]")
+        lines.append("- Flag as GAP if major claims lack citations")
+        lines.append("- Flag as ERROR if contradicted facts are used")
+
+        return "\n".join(lines)
 
     def _parse_editorial_feedback(self, content: str) -> EditorialFeedback:
         """Parse the LLM response into EditorialFeedback."""
@@ -475,6 +561,7 @@ class JudgeAgent(Agent):
         return EditorialFeedback(
             preferred_synthesis=data.get("preferred_synthesis", "claude"),
             preference_reasoning=data.get("preference_reasoning", ""),
+            rejection_reason=data.get("rejection_reason"),  # None if not reject_both
             claude_score=quality.get("claude_score", 0.5),
             gpt_score=quality.get("gpt_score", 0.5),
             key_differentiators=quality.get("key_differentiators", []),

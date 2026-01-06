@@ -90,6 +90,7 @@ class SourceTier(str, Enum):
     INSTITUTIONAL = "institutional"  # Analyst reports, rating agencies
     NEWS = "news"  # Major financial news outlets
     OTHER = "other"  # Blogs, forums, social media
+    DERIVED = "derived"  # Summaries, EvidenceCards, computed artifacts
 
 
 @dataclass(frozen=True)
@@ -264,6 +265,93 @@ class RunState:
         return self.budget_remaining_usd < 0
 
 
+@dataclass
+class TranscriptExtract:
+    """Structured extraction from an earnings call transcript.
+
+    Contains targeted excerpts and structured data extracted from transcripts,
+    significantly smaller than the full transcript text.
+    """
+
+    quarter: str  # e.g., "Q3 2025"
+    year: int
+    quarter_num: int
+
+    # KPI mentions with context
+    kpi_mentions: list[dict[str, Any]] = field(default_factory=list)
+    # {"metric": "ARR", "value": "$X", "context": "...", "change_yoy": "+15%"}
+
+    # Guidance changes with quotes
+    guidance_changes: list[dict[str, Any]] = field(default_factory=list)
+    # {"metric": "Revenue", "old": "$X", "new": "$Y", "direction": "raised", "quote": "..."}
+
+    # Analyst pushback / contentious exchanges
+    heated_exchanges: list[str] = field(default_factory=list)
+
+    # Questions management deflected or gave vague answers
+    deflected_questions: list[str] = field(default_factory=list)
+
+    # Themes mentioned 3+ times
+    repeated_themes: list[str] = field(default_factory=list)
+
+    # First-time mentions (new initiatives, products, markets)
+    new_initiatives: list[str] = field(default_factory=list)
+
+    # Key verbatim quotes (max 10 most important)
+    key_quotes: list[str] = field(default_factory=list)
+
+    # Management tone indicators
+    tone_indicators: dict[str, Any] = field(default_factory=dict)
+    # {"overall": "confident", "on_guidance": "cautious", "on_competition": "dismissive"}
+
+    # Raw excerpt for fallback (truncated to ~2000 chars)
+    raw_excerpt: str = ""
+
+    def to_prompt_string(self, max_chars: int = 4000) -> str:
+        """Convert to a string suitable for LLM prompts."""
+        lines = [f"## Transcript Extract: {self.quarter}"]
+
+        if self.kpi_mentions:
+            lines.append("\n### Key Metrics Mentioned:")
+            for kpi in self.kpi_mentions[:10]:
+                lines.append(f"- {kpi.get('metric', 'N/A')}: {kpi.get('value', 'N/A')}")
+                if kpi.get('change_yoy'):
+                    lines.append(f"  (YoY: {kpi['change_yoy']})")
+
+        if self.guidance_changes:
+            lines.append("\n### Guidance Changes:")
+            for g in self.guidance_changes[:5]:
+                lines.append(f"- {g.get('metric', 'N/A')}: {g.get('direction', 'N/A')}")
+                if g.get('quote'):
+                    lines.append(f"  \"{g['quote'][:200]}...\"")
+
+        if self.key_quotes:
+            lines.append("\n### Key Quotes:")
+            for q in self.key_quotes[:5]:
+                lines.append(f"- \"{q[:300]}...\"")
+
+        if self.repeated_themes:
+            lines.append(f"\n### Repeated Themes: {', '.join(self.repeated_themes[:5])}")
+
+        if self.new_initiatives:
+            lines.append(f"\n### New Initiatives: {', '.join(self.new_initiatives[:5])}")
+
+        if self.heated_exchanges:
+            lines.append("\n### Notable Analyst Exchanges:")
+            for ex in self.heated_exchanges[:3]:
+                lines.append(f"- {ex[:200]}...")
+
+        if self.deflected_questions:
+            lines.append("\n### Deflected/Vague Responses:")
+            for dq in self.deflected_questions[:3]:
+                lines.append(f"- {dq[:200]}...")
+
+        result = "\n".join(lines)
+        if len(result) > max_chars:
+            result = result[:max_chars] + "\n[truncated]"
+        return result
+
+
 @dataclass(frozen=True)
 class ResearchThread:
     """A research thread representing a focused area of investigation.
@@ -415,6 +503,13 @@ class CompanyContext:
     price_target_consensus: dict[str, Any] = field(default_factory=dict)
     analyst_grades: list[dict[str, Any]] = field(default_factory=list)
 
+    # Quantitative metrics (computed ratios, scores, red flags)
+    # Contains: ROIC, quality scores, reinvestment rate, buyback check, red flags
+    quant_metrics: dict[str, Any] = field(default_factory=dict)
+
+    # Real-time market data from yfinance (current price, volume, etc.)
+    market_data: dict[str, Any] = field(default_factory=dict)
+
     # Evidence tracking
     evidence_ids: tuple[str, ...] = field(default_factory=tuple)
 
@@ -437,6 +532,8 @@ class CompanyContext:
             price_target_summary=data.get("price_target_summary", {}),
             price_target_consensus=data.get("price_target_consensus", {}),
             analyst_grades=data.get("analyst_grades", []),
+            quant_metrics=data.get("quant_metrics", {}),
+            market_data=data.get("market_data", {}),
             evidence_ids=tuple(data.get("evidence_ids", [])),
         )
 
@@ -609,6 +706,11 @@ class CompanyContext:
                 for g in self.analyst_grades[:10]
             ]
 
+        # Pre-computed quantitative metrics (ROIC, quality scores, red flags)
+        # Critical for discovery and synthesis agents
+        if self.quant_metrics:
+            payload["quant_metrics"] = self.quant_metrics
+
         return payload
 
     def to_prompt_string(self, max_tokens: int | None = None) -> str:
@@ -616,25 +718,326 @@ class CompanyContext:
 
         Args:
             max_tokens: Optional max token limit (estimated by chars/4).
-                       Note: Transcripts are NOT truncated regardless of this.
+                       If exceeded, will progressively reduce content.
 
         Returns:
-            JSON string with all company context.
+            JSON string with company context.
         """
         import json
+        from er.logging import get_logger
+        logger = get_logger(__name__)
 
         payload = self.to_json_payload()
         full_text = json.dumps(payload, indent=2, default=str)
 
-        # Truncate if needed (but warn - transcripts should not be truncated)
-        if max_tokens:
-            max_chars = max_tokens * 4
-            if len(full_text) > max_chars:
-                # Don't truncate - just log warning and return full
-                # Truncating JSON mid-way would break parsing
-                pass
+        if not max_tokens:
+            return full_text
 
-        return full_text
+        max_chars = max_tokens * 4
+        if len(full_text) <= max_chars:
+            return full_text
+
+        # Progressive truncation - remove least critical data first
+        logger.warning(
+            "Context exceeds max_tokens, applying progressive truncation",
+            full_chars=len(full_text),
+            max_chars=max_chars,
+            symbol=self.symbol,
+        )
+
+        # Priority 1: Remove full transcript text (keep metadata)
+        if "earnings_transcripts" in payload:
+            for t in payload["earnings_transcripts"]:
+                if "full_text" in t:
+                    t["full_text"] = "[TRUNCATED - use transcript_extracts instead]"
+
+        text = json.dumps(payload, indent=2, default=str)
+        if len(text) <= max_chars:
+            logger.info("Truncated transcripts to fit context", new_chars=len(text))
+            return text
+
+        # Priority 2: Remove older quarterly statements (keep last 4)
+        if "income_statement_quarterly" in payload:
+            payload["income_statement_quarterly"] = payload["income_statement_quarterly"][:4]
+
+        text = json.dumps(payload, indent=2, default=str)
+        if len(text) <= max_chars:
+            return text
+
+        # Priority 3: Remove news beyond top 5
+        if "recent_news" in payload:
+            payload["recent_news"] = payload["recent_news"][:5]
+
+        text = json.dumps(payload, indent=2, default=str)
+        if len(text) <= max_chars:
+            return text
+
+        # Priority 4: Remove analyst grades
+        if "recent_analyst_grades" in payload:
+            del payload["recent_analyst_grades"]
+
+        text = json.dumps(payload, indent=2, default=str)
+        if len(text) <= max_chars:
+            return text
+
+        # Priority 5: Remove older annual statements
+        if "income_statement_annual" in payload:
+            payload["income_statement_annual"] = payload["income_statement_annual"][:2]
+        if "balance_sheet_annual" in payload:
+            payload["balance_sheet_annual"] = payload["balance_sheet_annual"][:1]
+        if "cash_flow_annual" in payload:
+            payload["cash_flow_annual"] = payload["cash_flow_annual"][:1]
+
+        text = json.dumps(payload, indent=2, default=str)
+        logger.warning(
+            "Aggressive truncation applied",
+            final_chars=len(text),
+            max_chars=max_chars,
+        )
+        return text
+
+    def for_discovery(self) -> str:
+        """Context view for Stage 2 Discovery.
+
+        Includes: Full financials, news headlines, transcript metadata (not full text).
+        Optimized for initial research thread identification.
+        """
+        import json
+
+        payload = self.to_json_payload()
+
+        # Keep transcript metadata but not full text (Discovery identifies threads, not deep analysis)
+        if "earnings_transcripts" in payload:
+            for t in payload["earnings_transcripts"]:
+                if "full_text" in t and len(t.get("full_text", "")) > 2000:
+                    # Keep first 2000 chars as preview
+                    t["full_text"] = t["full_text"][:2000] + "\n[...transcript continues...]"
+
+        return json.dumps(payload, indent=2, default=str)
+
+    def for_deep_research(self, verticals: list[str] | None = None) -> str:
+        """Context view for Stage 3 Deep Research.
+
+        Includes: Full financials, segmentation, full transcripts.
+        Verticals parameter reserved for future filtering.
+        """
+        import json
+
+        payload = self.to_json_payload()
+        return json.dumps(payload, indent=2, default=str)
+
+    def for_synthesis(self) -> dict[str, Any]:
+        """Context view for Stage 4 Synthesis.
+
+        Compact dict with: profile + latest quarter + key multiples + quant_metrics + market_data.
+        Suitable for passing to synthesizer agent.
+
+        Returns:
+            Dict with essential synthesis context.
+        """
+        payload: dict[str, Any] = {
+            "symbol": self.symbol,
+        }
+
+        # Profile summary
+        if self.profile:
+            payload["profile"] = {
+                "company_name": self.profile.get("companyName"),
+                "sector": self.profile.get("sector"),
+                "industry": self.profile.get("industry"),
+                "market_cap": self.profile.get("mktCap"),
+            }
+
+        # Only latest quarter for quick reference
+        if self.income_statement_quarterly:
+            stmt = self.income_statement_quarterly[0]
+            payload["latest_quarter"] = {
+                "date": stmt.get("date"),
+                "revenue": stmt.get("revenue"),
+                "net_income": stmt.get("netIncome"),
+                "eps": stmt.get("eps"),
+            }
+
+        # Key multiples from price target consensus
+        if self.price_target_consensus:
+            payload["price_target_consensus"] = {
+                "target_median": self.price_target_consensus.get("targetMedian"),
+                "target_consensus": self.price_target_consensus.get("targetConsensus"),
+            }
+
+        # Quant metrics - critical for synthesis quality assessment
+        if self.quant_metrics:
+            payload["quant_metrics"] = self.quant_metrics
+
+        # Real-time market data
+        if self.market_data:
+            payload["market_data"] = self.market_data
+
+        return payload
+
+    def for_verification(self) -> dict[str, Any]:
+        """Context view for Verification Agent.
+
+        Full dict with: financial statements + segment data + quant_metrics + market_data.
+        Used for fact-checking numeric claims against ground truth.
+
+        Returns:
+            Dict with comprehensive financial data for verification.
+        """
+        payload: dict[str, Any] = {
+            "symbol": self.symbol,
+        }
+
+        # Profile
+        if self.profile:
+            payload["profile"] = {
+                "company_name": self.profile.get("companyName"),
+                "sector": self.profile.get("sector"),
+                "industry": self.profile.get("industry"),
+                "market_cap": self.profile.get("mktCap"),
+                "price": self.profile.get("price"),
+            }
+
+        # Full income statements for verification
+        if self.income_statement_annual:
+            payload["income_statement_annual"] = [
+                {
+                    "date": stmt.get("date"),
+                    "period": stmt.get("period"),
+                    "revenue": stmt.get("revenue"),
+                    "gross_profit": stmt.get("grossProfit"),
+                    "gross_profit_ratio": stmt.get("grossProfitRatio"),
+                    "operating_income": stmt.get("operatingIncome"),
+                    "operating_income_ratio": stmt.get("operatingIncomeRatio"),
+                    "net_income": stmt.get("netIncome"),
+                    "net_income_ratio": stmt.get("netIncomeRatio"),
+                    "eps": stmt.get("eps"),
+                    "eps_diluted": stmt.get("epsdiluted"),
+                    "ebitda": stmt.get("ebitda"),
+                }
+                for stmt in self.income_statement_annual[:5]
+            ]
+
+        if self.income_statement_quarterly:
+            payload["income_statement_quarterly"] = [
+                {
+                    "date": stmt.get("date"),
+                    "period": stmt.get("period"),
+                    "revenue": stmt.get("revenue"),
+                    "gross_profit": stmt.get("grossProfit"),
+                    "operating_income": stmt.get("operatingIncome"),
+                    "net_income": stmt.get("netIncome"),
+                    "eps": stmt.get("eps"),
+                }
+                for stmt in self.income_statement_quarterly[:8]
+            ]
+
+        # Balance sheet for verification
+        if self.balance_sheet_annual:
+            payload["balance_sheet_annual"] = [
+                {
+                    "date": bs.get("date"),
+                    "total_assets": bs.get("totalAssets"),
+                    "total_liabilities": bs.get("totalLiabilities"),
+                    "total_equity": bs.get("totalStockholdersEquity"),
+                    "cash_and_equivalents": bs.get("cashAndCashEquivalents"),
+                    "total_debt": bs.get("totalDebt"),
+                    "net_debt": bs.get("netDebt"),
+                }
+                for bs in self.balance_sheet_annual[:3]
+            ]
+
+        # Cash flow for verification
+        if self.cash_flow_annual:
+            payload["cash_flow_annual"] = [
+                {
+                    "date": cf.get("date"),
+                    "operating_cash_flow": cf.get("operatingCashFlow"),
+                    "capital_expenditure": cf.get("capitalExpenditure"),
+                    "free_cash_flow": cf.get("freeCashFlow"),
+                }
+                for cf in self.cash_flow_annual[:3]
+            ]
+
+        # Revenue segmentation
+        if self.revenue_product_segmentation:
+            payload["revenue_by_product"] = self.revenue_product_segmentation[:5]
+
+        if self.revenue_geographic_segmentation:
+            payload["revenue_by_geography"] = self.revenue_geographic_segmentation[:5]
+
+        # Quant metrics - critical for verification
+        if self.quant_metrics:
+            payload["quant_metrics"] = self.quant_metrics
+
+        # Market data
+        if self.market_data:
+            payload["market_data"] = self.market_data
+
+        return payload
+
+    def for_judge(self) -> str:
+        """Context view for Stage 5 Judge.
+
+        Key metrics only for claim validation.
+        Includes: profile, key financials, price targets.
+        """
+        import json
+
+        payload: dict[str, Any] = {
+            "symbol": self.symbol,
+        }
+
+        # Profile
+        if self.profile:
+            payload["profile"] = {
+                "company_name": self.profile.get("companyName"),
+                "sector": self.profile.get("sector"),
+                "industry": self.profile.get("industry"),
+                "market_cap": self.profile.get("mktCap"),
+                "price": self.profile.get("price"),
+            }
+
+        # Key financials for fact-checking
+        if self.income_statement_annual:
+            stmt = self.income_statement_annual[0]
+            payload["latest_annual"] = {
+                "date": stmt.get("date"),
+                "revenue": stmt.get("revenue"),
+                "gross_profit": stmt.get("grossProfit"),
+                "operating_income": stmt.get("operatingIncome"),
+                "net_income": stmt.get("netIncome"),
+                "eps": stmt.get("eps"),
+            }
+
+        if self.income_statement_quarterly:
+            stmt = self.income_statement_quarterly[0]
+            payload["latest_quarter"] = {
+                "date": stmt.get("date"),
+                "revenue": stmt.get("revenue"),
+                "net_income": stmt.get("netIncome"),
+                "eps": stmt.get("eps"),
+            }
+
+        # Balance sheet summary
+        if self.balance_sheet_annual:
+            bs = self.balance_sheet_annual[0]
+            payload["balance_sheet"] = {
+                "total_assets": bs.get("totalAssets"),
+                "total_debt": bs.get("totalDebt"),
+                "net_debt": bs.get("netDebt"),
+                "total_equity": bs.get("totalStockholdersEquity"),
+            }
+
+        # Price targets
+        if self.price_target_consensus:
+            payload["price_target_consensus"] = self.price_target_consensus
+
+        # Quant metrics - critical for fact-checking claims (ROIC, buyback distortion, red flags)
+        if self.quant_metrics:
+            payload["quant_metrics"] = self.quant_metrics
+
+        return json.dumps(payload, indent=2, default=str)
 
     @property
     def company_name(self) -> str:
@@ -754,6 +1157,35 @@ class ResearchGroup:
 
 
 @dataclass
+class ThreadBrief:
+    """Brief for a research thread - explains WHY it was prioritized.
+
+    Contains rationale, hypotheses, and evidence pointers for each thread.
+    Used to preserve context across stage handoffs.
+    """
+
+    thread_id: str
+    rationale: str  # Why this thread was prioritized
+    hypotheses: list[str]  # Key hypotheses to test
+    key_questions: list[str]  # Questions to answer
+    required_evidence: list[str]  # What evidence is needed
+    key_evidence_ids: list[str] = field(default_factory=list)  # Supporting evidence
+    confidence: float = 0.5  # 0.0-1.0 confidence in importance
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization."""
+        return {
+            "thread_id": self.thread_id,
+            "rationale": self.rationale,
+            "hypotheses": self.hypotheses,
+            "key_questions": self.key_questions,
+            "required_evidence": self.required_evidence,
+            "key_evidence_ids": self.key_evidence_ids,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
 class DiscoveryOutput:
     """Output from the Discovery Agent.
 
@@ -782,6 +1214,9 @@ class DiscoveryOutput:
     # Evidence
     evidence_ids: list[str] = field(default_factory=list)
 
+    # ThreadBriefs - preserves WHY each thread was prioritized
+    thread_briefs: list[ThreadBrief] = field(default_factory=list)
+
     # Discovery metadata
     discovery_timestamp: datetime = field(default_factory=utc_now)
 
@@ -809,12 +1244,148 @@ class DiscoveryOutput:
 
 # ============== Stage 3: Vertical Analysis Output ==============
 
+
+class FactCategory(str, Enum):
+    """Categories for research facts."""
+
+    FINANCIAL = "financial"  # Revenue, growth, margins from company data
+    COMPETITIVE = "competitive"  # Market share, competitor moves
+    DEVELOPMENT = "development"  # Recent news, product launches, deals
+    RISK = "risk"  # Risk factors and uncertainties
+    TAILWIND = "tailwind"  # Positive growth factors
+    HEADWIND = "headwind"  # Negative growth factors
+    ANALYST = "analyst"  # Analyst views and estimates
+    OTHER = "other"
+
+
+@dataclass
+class Fact:
+    """A verified fact extracted from research.
+
+    Each fact is atomic, citable, and traceable to evidence.
+    The synthesizer builds arguments from these facts.
+    """
+
+    fact_id: str
+    statement: str  # The factual claim
+    category: FactCategory
+    evidence_id: str  # ID of supporting evidence
+    source: str  # Human-readable source (e.g., "SEC 10-Q", "Bloomberg")
+    source_date: str | None = None  # When the source was published
+    confidence: float = 0.5  # 0.0-1.0 confidence in this fact
+    vertical_id: str | None = None  # Which vertical this fact relates to
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization."""
+        return {
+            "fact_id": self.fact_id,
+            "statement": self.statement,
+            "category": self.category.value,
+            "evidence_id": self.evidence_id,
+            "source": self.source,
+            "source_date": self.source_date,
+            "confidence": self.confidence,
+            "vertical_id": self.vertical_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Fact":
+        """Create Fact from dict."""
+        return cls(
+            fact_id=data["fact_id"],
+            statement=data["statement"],
+            category=FactCategory(data["category"]),
+            evidence_id=data["evidence_id"],
+            source=data["source"],
+            source_date=data.get("source_date"),
+            confidence=data.get("confidence", 0.5),
+            vertical_id=data.get("vertical_id"),
+        )
+
+
+@dataclass
+class VerticalDossier:
+    """Structured research output for a single vertical.
+
+    Contains:
+    - Extracted facts with evidence IDs
+    - Analysis narrative
+    - Metadata for synthesis
+    """
+
+    dossier_id: str
+    thread_id: str
+    vertical_name: str
+
+    # Structured facts extracted from research
+    facts: list[Fact]
+
+    # Narrative analysis (prose from Deep Research)
+    analysis_narrative: str
+
+    # Metadata
+    research_questions_answered: list[str]
+    unanswered_questions: list[str]
+    data_gaps: list[str]
+
+    # Quality metrics
+    source_count: int = 0
+    recent_source_count: int = 0  # Sources from last 60 days
+    confidence: float = 0.5
+
+    # Evidence tracking
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization."""
+        return {
+            "dossier_id": self.dossier_id,
+            "thread_id": self.thread_id,
+            "vertical_name": self.vertical_name,
+            "facts": [f.to_dict() for f in self.facts],
+            "analysis_narrative": self.analysis_narrative,
+            "research_questions_answered": self.research_questions_answered,
+            "unanswered_questions": self.unanswered_questions,
+            "data_gaps": self.data_gaps,
+            "source_count": self.source_count,
+            "recent_source_count": self.recent_source_count,
+            "confidence": self.confidence,
+            "evidence_ids": self.evidence_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "VerticalDossier":
+        """Create VerticalDossier from dict."""
+        return cls(
+            dossier_id=data["dossier_id"],
+            thread_id=data["thread_id"],
+            vertical_name=data["vertical_name"],
+            facts=[Fact.from_dict(f) for f in data.get("facts", [])],
+            analysis_narrative=data["analysis_narrative"],
+            research_questions_answered=data.get("research_questions_answered", []),
+            unanswered_questions=data.get("unanswered_questions", []),
+            data_gaps=data.get("data_gaps", []),
+            source_count=data.get("source_count", 0),
+            recent_source_count=data.get("recent_source_count", 0),
+            confidence=data.get("confidence", 0.5),
+            evidence_ids=data.get("evidence_ids", []),
+        )
+
+    def get_facts_by_category(self, category: FactCategory) -> list[Fact]:
+        """Get facts filtered by category."""
+        return [f for f in self.facts if f.category == category]
+
+    def get_high_confidence_facts(self, threshold: float = 0.7) -> list[Fact]:
+        """Get facts above confidence threshold."""
+        return [f for f in self.facts if f.confidence >= threshold]
+
+
 @dataclass
 class VerticalAnalysis:
     """Output from a Vertical Analyst agent.
 
     Deep analysis of a single research thread/vertical.
-    Contains prose from Deep Research.
+    Contains prose from Deep Research and structured facts.
     """
 
     thread_id: str
@@ -822,6 +1393,10 @@ class VerticalAnalysis:
     business_understanding: str  # The prose research report
     evidence_ids: list[str] = field(default_factory=list)
     overall_confidence: float = 0.0
+
+    # Structured output (Phase 6)
+    facts: list[Fact] = field(default_factory=list)
+    dossier: VerticalDossier | None = None
 
 
 @dataclass
@@ -850,6 +1425,367 @@ class GroupResearchOutput:
 
     # Evidence
     evidence_ids: list[str]
+
+
+# ============== Stage 3.5: Verification Output ==============
+
+
+class VerificationStatus(str, Enum):
+    """Status of a fact after verification."""
+
+    VERIFIED = "verified"  # Fact matches ground truth data
+    CONTRADICTED = "contradicted"  # Fact contradicts ground truth data
+    UNVERIFIABLE = "unverifiable"  # Cannot verify against available data
+    PARTIAL = "partial"  # Partially verified (some aspects match, some don't)
+
+
+@dataclass
+class VerifiedFact:
+    """A fact that has been through verification.
+
+    Extends the original Fact with verification status and notes.
+    """
+
+    original_fact: Fact
+    status: VerificationStatus
+    verification_notes: str  # Explanation of verification result
+    ground_truth_source: str | None = None  # What data was used to verify
+    confidence_adjustment: float = 0.0  # Adjustment to original confidence
+
+    @property
+    def adjusted_confidence(self) -> float:
+        """Get confidence after adjustment."""
+        base = self.original_fact.confidence
+        return max(0.0, min(1.0, base + self.confidence_adjustment))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "original_fact": self.original_fact.to_dict(),
+            "status": self.status.value,
+            "verification_notes": self.verification_notes,
+            "ground_truth_source": self.ground_truth_source,
+            "confidence_adjustment": self.confidence_adjustment,
+            "adjusted_confidence": self.adjusted_confidence,
+        }
+
+
+@dataclass
+class VerificationResult:
+    """Result of verifying facts for a single vertical."""
+
+    vertical_name: str
+    thread_id: str
+    verified_facts: list[VerifiedFact]
+
+    # Summary stats
+    verified_count: int = 0
+    contradicted_count: int = 0
+    unverifiable_count: int = 0
+
+    # Critical issues found
+    critical_contradictions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "vertical_name": self.vertical_name,
+            "thread_id": self.thread_id,
+            "verified_facts": [vf.to_dict() for vf in self.verified_facts],
+            "verified_count": self.verified_count,
+            "contradicted_count": self.contradicted_count,
+            "unverifiable_count": self.unverifiable_count,
+            "critical_contradictions": self.critical_contradictions,
+        }
+
+
+@dataclass
+class VerifiedResearchPackage:
+    """Output from the Verification Agent.
+
+    Contains all research with verification status.
+    This is the input to the Synthesizer.
+    """
+
+    ticker: str
+    verification_results: list[VerificationResult]
+
+    # All verified facts across verticals (for easy access)
+    all_verified_facts: list[VerifiedFact] = field(default_factory=list)
+
+    # Summary
+    total_facts: int = 0
+    verified_count: int = 0
+    contradicted_count: int = 0
+    unverifiable_count: int = 0
+
+    # Critical issues (facts that contradict ground truth)
+    critical_issues: list[str] = field(default_factory=list)
+
+    # Original research (passed through)
+    group_outputs: list[GroupResearchOutput] = field(default_factory=list)
+
+    # Evidence
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "ticker": self.ticker,
+            "verification_results": [vr.to_dict() for vr in self.verification_results],
+            "total_facts": self.total_facts,
+            "verified_count": self.verified_count,
+            "contradicted_count": self.contradicted_count,
+            "unverifiable_count": self.unverifiable_count,
+            "critical_issues": self.critical_issues,
+            "evidence_ids": self.evidence_ids,
+        }
+
+    def get_verified_facts(self, min_confidence: float = 0.5) -> list[VerifiedFact]:
+        """Get only verified facts above confidence threshold."""
+        return [
+            vf for vf in self.all_verified_facts
+            if vf.status == VerificationStatus.VERIFIED
+            and vf.adjusted_confidence >= min_confidence
+        ]
+
+    def get_contradicted_facts(self) -> list[VerifiedFact]:
+        """Get all contradicted facts."""
+        return [
+            vf for vf in self.all_verified_facts
+            if vf.status == VerificationStatus.CONTRADICTED
+        ]
+
+
+# ============== Stage 3.75: Integration Output ==============
+
+
+class RelationshipType(str, Enum):
+    """Type of relationship between verticals."""
+
+    DEPENDENCY = "dependency"  # A depends on B
+    SYNERGY = "synergy"  # A and B reinforce each other
+    COMPETITION = "competition"  # A and B compete for resources
+    SHARED_RISK = "shared_risk"  # A and B share same risk exposure
+    CANNIBALIZATION = "cannibalization"  # A growth hurts B
+
+
+@dataclass
+class VerticalRelationship:
+    """A relationship between two verticals."""
+
+    source_vertical: str  # Vertical ID or name
+    target_vertical: str  # Vertical ID or name
+    relationship_type: RelationshipType
+    description: str
+    strength: str  # "high", "medium", "low"
+    supporting_facts: list[str]  # Fact IDs or statements
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "source_vertical": self.source_vertical,
+            "target_vertical": self.target_vertical,
+            "relationship_type": self.relationship_type.value,
+            "description": self.description,
+            "strength": self.strength,
+            "supporting_facts": self.supporting_facts,
+        }
+
+
+@dataclass
+class SharedRisk:
+    """A risk that affects multiple verticals."""
+
+    risk_description: str
+    affected_verticals: list[str]
+    severity: str  # "high", "medium", "low"
+    probability: str  # "high", "medium", "low"
+    mitigation_notes: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "risk_description": self.risk_description,
+            "affected_verticals": self.affected_verticals,
+            "severity": self.severity,
+            "probability": self.probability,
+            "mitigation_notes": self.mitigation_notes,
+        }
+
+
+@dataclass
+class CrossVerticalInsight:
+    """An insight that emerges from cross-vertical analysis."""
+
+    insight: str
+    related_verticals: list[str]
+    implication: str  # What this means for the investment thesis
+    confidence: float = 0.5
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "insight": self.insight,
+            "related_verticals": self.related_verticals,
+            "implication": self.implication,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class CrossVerticalMap:
+    """Output from the Integrator Agent.
+
+    Maps relationships, dependencies, and shared risks across verticals.
+    This helps the synthesizer build a coherent narrative.
+    """
+
+    ticker: str
+
+    # Relationships between verticals
+    relationships: list[VerticalRelationship]
+
+    # Risks that span multiple verticals
+    shared_risks: list[SharedRisk]
+
+    # High-level insights from cross-vertical analysis
+    cross_vertical_insights: list[CrossVerticalInsight]
+
+    # Key dependencies to highlight in synthesis
+    key_dependencies: list[str]
+
+    # Verticals that are foundational (others depend on them)
+    foundational_verticals: list[str]
+
+    # Evidence
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "ticker": self.ticker,
+            "relationships": [r.to_dict() for r in self.relationships],
+            "shared_risks": [sr.to_dict() for sr in self.shared_risks],
+            "cross_vertical_insights": [cvi.to_dict() for cvi in self.cross_vertical_insights],
+            "key_dependencies": self.key_dependencies,
+            "foundational_verticals": self.foundational_verticals,
+            "evidence_ids": self.evidence_ids,
+        }
+
+    def get_relationships_for_vertical(self, vertical: str) -> list[VerticalRelationship]:
+        """Get all relationships involving a specific vertical."""
+        return [
+            r for r in self.relationships
+            if r.source_vertical == vertical or r.target_vertical == vertical
+        ]
+
+    def get_risks_for_vertical(self, vertical: str) -> list[SharedRisk]:
+        """Get all shared risks affecting a specific vertical."""
+        return [
+            sr for sr in self.shared_risks
+            if vertical in sr.affected_verticals
+        ]
+
+
+# ============== Stage 3.9: Valuation Pack (Optional) ==============
+
+
+@dataclass
+class ComparableCompany:
+    """A comparable company for valuation purposes."""
+
+    ticker: str
+    name: str
+    market_cap: float | None = None
+    pe_ratio: float | None = None
+    ev_revenue: float | None = None
+    ev_ebitda: float | None = None
+    revenue_growth: float | None = None
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "ticker": self.ticker,
+            "name": self.name,
+            "market_cap": self.market_cap,
+            "pe_ratio": self.pe_ratio,
+            "ev_revenue": self.ev_revenue,
+            "ev_ebitda": self.ev_ebitda,
+            "revenue_growth": self.revenue_growth,
+            "notes": self.notes,
+        }
+
+
+@dataclass
+class HistoricalValuation:
+    """Historical valuation range for the company."""
+
+    metric: str  # "P/E", "EV/Revenue", "EV/EBITDA"
+    current: float | None = None
+    historical_low: float | None = None
+    historical_high: float | None = None
+    historical_avg: float | None = None
+    percentile: float | None = None  # Where current sits vs history (0-100)
+    period: str = "5Y"  # Time period for history
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "metric": self.metric,
+            "current": self.current,
+            "historical_low": self.historical_low,
+            "historical_high": self.historical_high,
+            "historical_avg": self.historical_avg,
+            "percentile": self.percentile,
+            "period": self.period,
+        }
+
+
+@dataclass
+class ValuationPack:
+    """Optional valuation data pack for synthesis.
+
+    Contains:
+    - Comparable companies with multiples
+    - Historical valuation ranges
+    - Relative valuation assessment
+    """
+
+    ticker: str
+
+    # Comparable companies
+    comparables: list[ComparableCompany]
+
+    # Historical valuation ranges
+    historical_valuations: list[HistoricalValuation]
+
+    # Summary metrics
+    peer_median_pe: float | None = None
+    peer_median_ev_revenue: float | None = None
+    premium_discount_to_peers: float | None = None  # % premium (+) or discount (-)
+
+    # Commentary
+    valuation_summary: str = ""
+    key_valuation_debates: list[str] = field(default_factory=list)
+
+    # Evidence
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict."""
+        return {
+            "ticker": self.ticker,
+            "comparables": [c.to_dict() for c in self.comparables],
+            "historical_valuations": [hv.to_dict() for hv in self.historical_valuations],
+            "peer_median_pe": self.peer_median_pe,
+            "peer_median_ev_revenue": self.peer_median_ev_revenue,
+            "premium_discount_to_peers": self.premium_discount_to_peers,
+            "valuation_summary": self.valuation_summary,
+            "key_valuation_debates": self.key_valuation_debates,
+            "evidence_ids": self.evidence_ids,
+        }
 
 
 # ============== Stage 4: Synthesis Output ==============
@@ -965,10 +1901,12 @@ class EditorialFeedback:
 
     The Judge picks a winner and provides specific, actionable feedback
     for that Synthesizer to revise their report.
+
+    Can also reject both syntheses if quality is unacceptable.
     """
 
-    # Which synthesis was chosen
-    preferred_synthesis: str  # "claude" or "gpt"
+    # Which synthesis was chosen (or "reject_both")
+    preferred_synthesis: str  # "claude" | "gpt" | "reject_both"
     preference_reasoning: str
 
     # Quality assessment
@@ -997,6 +1935,10 @@ class EditorialFeedback:
     analysis_quality: str  # "high", "medium", "low"
     key_strengths: list[str]
     key_weaknesses: list[str]
+
+    # Rejection reason (only set if preferred_synthesis == "reject_both")
+    # Placed at end because it has a default value
+    rejection_reason: str | None = None
 
 
 @dataclass
@@ -1048,3 +1990,585 @@ class JudgeVerdict:
 
     # Metadata
     judge_timestamp: datetime = field(default_factory=utc_now)
+
+
+# =============================================================================
+# Coverage & Recency Types (Institutional-Grade Hardening)
+# =============================================================================
+
+
+class CoverageCategory(str, Enum):
+    """Categories for coverage auditing."""
+
+    RECENT_DEVELOPMENTS = "recent_developments"  # <= 90 days
+    COMPETITIVE_MOVES = "competitive_moves"
+    PRODUCT_ROADMAP = "product_roadmap"
+    REGULATORY_LITIGATION = "regulatory_litigation"
+    CAPITAL_ALLOCATION = "capital_allocation"  # buybacks, M&A
+    SEGMENT_ECONOMICS = "segment_economics"
+    AI_INFRASTRUCTURE = "ai_infrastructure"  # for relevant companies
+    MANAGEMENT_TONE = "management_tone"  # transcript contradictions
+
+
+class CoverageStatus(str, Enum):
+    """Status of coverage for a category."""
+
+    PASS = "pass"
+    MARGINAL = "marginal"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass
+class CoverageCategoryResult:
+    """Result of coverage check for a single category."""
+
+    category: CoverageCategory
+    required_min_cards: int
+    found_cards: int
+    queries_run: list[str]
+    top_evidence_ids: list[str]
+    status: CoverageStatus
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "category": self.category.value,
+            "required_min_cards": self.required_min_cards,
+            "found_cards": self.found_cards,
+            "queries_run": self.queries_run,
+            "top_evidence_ids": self.top_evidence_ids,
+            "status": self.status.value,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CoverageCategoryResult":
+        """Create from dict."""
+        return cls(
+            category=CoverageCategory(data["category"]),
+            required_min_cards=data["required_min_cards"],
+            found_cards=data["found_cards"],
+            queries_run=data["queries_run"],
+            top_evidence_ids=data["top_evidence_ids"],
+            status=CoverageStatus(data["status"]),
+            notes=data.get("notes", ""),
+        )
+
+
+@dataclass
+class CoverageScorecard:
+    """Overall coverage scorecard for a research run."""
+
+    ticker: str
+    as_of_date: str
+    recency_days: int
+    results: list[CoverageCategoryResult]
+    overall_status: CoverageStatus
+    pass_rate: float = 0.0
+    total_evidence_cards: int = 0
+    total_queries_run: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "as_of_date": self.as_of_date,
+            "recency_days": self.recency_days,
+            "results": [r.to_dict() for r in self.results],
+            "overall_status": self.overall_status.value,
+            "pass_rate": self.pass_rate,
+            "total_evidence_cards": self.total_evidence_cards,
+            "total_queries_run": self.total_queries_run,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CoverageScorecard":
+        """Create from dict."""
+        return cls(
+            ticker=data["ticker"],
+            as_of_date=data["as_of_date"],
+            recency_days=data["recency_days"],
+            results=[CoverageCategoryResult.from_dict(r) for r in data["results"]],
+            overall_status=CoverageStatus(data["overall_status"]),
+            pass_rate=data.get("pass_rate", 0.0),
+            total_evidence_cards=data.get("total_evidence_cards", 0),
+            total_queries_run=data.get("total_queries_run", 0),
+        )
+
+
+@dataclass
+class CoverageAction:
+    """Record of a coverage gap-filling action."""
+
+    category: CoverageCategory
+    query: str
+    urls_fetched: list[str]
+    evidence_ids: list[str]
+    success: bool
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "category": self.category.value,
+            "query": self.query,
+            "urls_fetched": self.urls_fetched,
+            "evidence_ids": self.evidence_ids,
+            "success": self.success,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CoverageAction":
+        """Create from dict."""
+        return cls(
+            category=CoverageCategory(data["category"]),
+            query=data["query"],
+            urls_fetched=data["urls_fetched"],
+            evidence_ids=data["evidence_ids"],
+            success=data["success"],
+            notes=data.get("notes", ""),
+        )
+
+
+@dataclass
+class RecencyFinding:
+    """A finding from recency guard checking outdated priors."""
+
+    hypothesis: str  # What might be outdated
+    query: str  # Query used to check
+    finding: str  # What was found
+    status: str  # "confirmed", "denied", "inconclusive"
+    evidence_ids: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "hypothesis": self.hypothesis,
+            "query": self.query,
+            "finding": self.finding,
+            "status": self.status,
+            "evidence_ids": self.evidence_ids,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RecencyFinding":
+        """Create from dict."""
+        return cls(
+            hypothesis=data["hypothesis"],
+            query=data["query"],
+            finding=data["finding"],
+            status=data["status"],
+            evidence_ids=data.get("evidence_ids", []),
+            confidence=data.get("confidence", 0.5),
+        )
+
+
+@dataclass
+class RecencyGuardOutput:
+    """Output from the RecencyGuard agent."""
+
+    ticker: str
+    as_of_date: str
+    outdated_priors_checked: list[str]
+    findings: list[RecencyFinding]
+    forced_queries: list[str]
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "as_of_date": self.as_of_date,
+            "outdated_priors_checked": self.outdated_priors_checked,
+            "findings": [f.to_dict() for f in self.findings],
+            "forced_queries": self.forced_queries,
+            "evidence_ids": self.evidence_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RecencyGuardOutput":
+        """Create from dict."""
+        return cls(
+            ticker=data["ticker"],
+            as_of_date=data["as_of_date"],
+            outdated_priors_checked=data["outdated_priors_checked"],
+            findings=[RecencyFinding.from_dict(f) for f in data["findings"]],
+            forced_queries=data["forced_queries"],
+            evidence_ids=data.get("evidence_ids", []),
+        )
+
+
+# =============================================================================
+# ClaimGraph + Entailment Types
+# =============================================================================
+
+
+class ClaimType(str, Enum):
+    """Types of claims in a report."""
+
+    FACT = "fact"  # Verifiable statement
+    INFERENCE = "inference"  # Derived conclusion
+    FORECAST = "forecast"  # Forward-looking prediction
+    OPINION = "opinion"  # Subjective assessment
+
+
+class EntailmentStatus(str, Enum):
+    """Whether evidence supports a claim."""
+
+    SUPPORTED = "supported"
+    WEAK = "weak"
+    UNSUPPORTED = "unsupported"
+    CONTRADICTED = "contradicted"
+
+
+@dataclass
+class Claim:
+    """A claim extracted from a report or dossier."""
+
+    claim_id: str
+    text: str
+    claim_type: ClaimType
+    section: str  # Where in the report this appears
+    cited_evidence_ids: list[str] = field(default_factory=list)
+    linked_fact_ids: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "claim_id": self.claim_id,
+            "text": self.text,
+            "claim_type": self.claim_type.value,
+            "section": self.section,
+            "cited_evidence_ids": self.cited_evidence_ids,
+            "linked_fact_ids": self.linked_fact_ids,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Claim":
+        """Create from dict."""
+        return cls(
+            claim_id=data["claim_id"],
+            text=data["text"],
+            claim_type=ClaimType(data["claim_type"]),
+            section=data["section"],
+            cited_evidence_ids=data.get("cited_evidence_ids", []),
+            linked_fact_ids=data.get("linked_fact_ids", []),
+            confidence=data.get("confidence", 0.5),
+        )
+
+
+@dataclass
+class ClaimGraph:
+    """Graph of claims with links to facts and evidence."""
+
+    ticker: str
+    source: str  # "vertical_dossiers" or "synthesis"
+    claims: list[Claim]
+    total_claims: int = 0
+    cited_claims: int = 0
+    uncited_claims: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "source": self.source,
+            "claims": [c.to_dict() for c in self.claims],
+            "total_claims": self.total_claims,
+            "cited_claims": self.cited_claims,
+            "uncited_claims": self.uncited_claims,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ClaimGraph":
+        """Create from dict."""
+        return cls(
+            ticker=data["ticker"],
+            source=data["source"],
+            claims=[Claim.from_dict(c) for c in data["claims"]],
+            total_claims=data.get("total_claims", 0),
+            cited_claims=data.get("cited_claims", 0),
+            uncited_claims=data.get("uncited_claims", 0),
+        )
+
+
+@dataclass
+class EntailmentResult:
+    """Result of entailment check for a single claim."""
+
+    claim_id: str
+    status: EntailmentStatus
+    rationale: str
+    evidence_snippets: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "claim_id": self.claim_id,
+            "status": self.status.value,
+            "rationale": self.rationale,
+            "evidence_snippets": self.evidence_snippets,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EntailmentResult":
+        """Create from dict."""
+        return cls(
+            claim_id=data["claim_id"],
+            status=EntailmentStatus(data["status"]),
+            rationale=data["rationale"],
+            evidence_snippets=data.get("evidence_snippets", []),
+            confidence=data.get("confidence", 0.5),
+        )
+
+
+@dataclass
+class EntailmentReport:
+    """Full entailment verification report."""
+
+    ticker: str
+    total_claims: int
+    supported_count: int
+    weak_count: int
+    unsupported_count: int
+    contradicted_count: int
+    results: list[EntailmentResult]
+    overall_score: float = 0.0  # 0-1 score
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "total_claims": self.total_claims,
+            "supported_count": self.supported_count,
+            "weak_count": self.weak_count,
+            "unsupported_count": self.unsupported_count,
+            "contradicted_count": self.contradicted_count,
+            "results": [r.to_dict() for r in self.results],
+            "overall_score": self.overall_score,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EntailmentReport":
+        """Create from dict."""
+        return cls(
+            ticker=data["ticker"],
+            total_claims=data["total_claims"],
+            supported_count=data["supported_count"],
+            weak_count=data["weak_count"],
+            unsupported_count=data["unsupported_count"],
+            contradicted_count=data["contradicted_count"],
+            results=[EntailmentResult.from_dict(r) for r in data["results"]],
+            overall_score=data.get("overall_score", 0.0),
+        )
+
+
+# =============================================================================
+# Transcript/Filing Index Types
+# =============================================================================
+
+
+@dataclass
+class TextExcerpt:
+    """An excerpt from a transcript or filing."""
+
+    excerpt_id: str
+    source_evidence_id: str
+    source_type: str  # "transcript" or "filing"
+    text: str
+    start_offset: int
+    end_offset: int
+    metadata: dict[str, Any] = field(default_factory=dict)  # date, speaker, section, etc.
+    relevance_score: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "excerpt_id": self.excerpt_id,
+            "source_evidence_id": self.source_evidence_id,
+            "source_type": self.source_type,
+            "text": self.text,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "metadata": self.metadata,
+            "relevance_score": self.relevance_score,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TextExcerpt":
+        """Create from dict."""
+        return cls(
+            excerpt_id=data["excerpt_id"],
+            source_evidence_id=data["source_evidence_id"],
+            source_type=data["source_type"],
+            text=data["text"],
+            start_offset=data["start_offset"],
+            end_offset=data["end_offset"],
+            metadata=data.get("metadata", {}),
+            relevance_score=data.get("relevance_score", 0.0),
+        )
+
+
+# =============================================================================
+# Valuation Types
+# =============================================================================
+
+
+@dataclass
+class ProjectionInputs:
+    """Inputs for financial projections."""
+
+    ticker: str
+    base_year: int
+    projection_years: int
+    revenue_growth_rates: list[float]
+    gross_margin: float
+    operating_margin: float
+    tax_rate: float
+    capex_to_revenue: float
+    nwc_to_revenue: float
+    depreciation_to_capex: float
+    terminal_growth: float
+    assumptions_source: str = ""  # Where these came from
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "base_year": self.base_year,
+            "projection_years": self.projection_years,
+            "revenue_growth_rates": self.revenue_growth_rates,
+            "gross_margin": self.gross_margin,
+            "operating_margin": self.operating_margin,
+            "tax_rate": self.tax_rate,
+            "capex_to_revenue": self.capex_to_revenue,
+            "nwc_to_revenue": self.nwc_to_revenue,
+            "depreciation_to_capex": self.depreciation_to_capex,
+            "terminal_growth": self.terminal_growth,
+            "assumptions_source": self.assumptions_source,
+        }
+
+
+@dataclass
+class WACCInputs:
+    """Inputs for WACC calculation."""
+
+    risk_free_rate: float
+    equity_risk_premium: float
+    beta: float
+    cost_of_debt: float
+    tax_rate: float
+    debt_to_capital: float
+    size_premium: float = 0.0
+    industry_adjustment: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "risk_free_rate": self.risk_free_rate,
+            "equity_risk_premium": self.equity_risk_premium,
+            "beta": self.beta,
+            "cost_of_debt": self.cost_of_debt,
+            "tax_rate": self.tax_rate,
+            "debt_to_capital": self.debt_to_capital,
+            "size_premium": self.size_premium,
+            "industry_adjustment": self.industry_adjustment,
+        }
+
+
+@dataclass
+class DCFResult:
+    """Result of DCF valuation."""
+
+    enterprise_value: float
+    equity_value: float
+    per_share_value: float
+    wacc: float
+    terminal_value: float
+    pv_fcf: float
+    pv_terminal: float
+    shares_outstanding: float
+    net_debt: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "enterprise_value": self.enterprise_value,
+            "equity_value": self.equity_value,
+            "per_share_value": self.per_share_value,
+            "wacc": self.wacc,
+            "terminal_value": self.terminal_value,
+            "pv_fcf": self.pv_fcf,
+            "pv_terminal": self.pv_terminal,
+            "shares_outstanding": self.shares_outstanding,
+            "net_debt": self.net_debt,
+        }
+
+
+@dataclass
+class ReverseDCFResult:
+    """Result of reverse DCF (what's priced in)."""
+
+    current_price: float
+    implied_growth_rate: float
+    implied_terminal_growth: float
+    implied_margin: float
+    sensitivity_to_growth: float
+    sensitivity_to_margin: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "current_price": self.current_price,
+            "implied_growth_rate": self.implied_growth_rate,
+            "implied_terminal_growth": self.implied_terminal_growth,
+            "implied_margin": self.implied_margin,
+            "sensitivity_to_growth": self.sensitivity_to_growth,
+            "sensitivity_to_margin": self.sensitivity_to_margin,
+        }
+
+
+@dataclass
+class ValuationSummary:
+    """Summary of valuation analysis."""
+
+    ticker: str
+    as_of_date: str
+    current_price: float
+    dcf_value: float
+    dcf_upside: float  # % upside/downside
+    reverse_dcf: ReverseDCFResult | None
+    sensitivity_range: tuple[float, float]  # low, high
+    comps_median: float | None
+    comps_range: tuple[float, float] | None
+    sotp_value: float | None
+    key_assumptions: list[str]
+    key_sensitivities: list[str]
+    valuation_view: str  # "undervalued", "fairly_valued", "overvalued"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "ticker": self.ticker,
+            "as_of_date": self.as_of_date,
+            "current_price": self.current_price,
+            "dcf_value": self.dcf_value,
+            "dcf_upside": self.dcf_upside,
+            "reverse_dcf": self.reverse_dcf.to_dict() if self.reverse_dcf else None,
+            "sensitivity_range": list(self.sensitivity_range),
+            "comps_median": self.comps_median,
+            "comps_range": list(self.comps_range) if self.comps_range else None,
+            "sotp_value": self.sotp_value,
+            "key_assumptions": self.key_assumptions,
+            "key_sensitivities": self.key_sensitivities,
+            "valuation_view": self.valuation_view,
+        }

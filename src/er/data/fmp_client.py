@@ -904,6 +904,167 @@ class FMPClient:
             return f"Strong ({score}/9) — good financial health"
         return f"Excellent ({score}/9) — very strong financial health"
 
+    def _compute_advanced_metrics(
+        self,
+        income_statements: list[dict[str, Any]],
+        balance_sheets: list[dict[str, Any]],
+        cash_flows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Compute advanced financial metrics not available from standard APIs.
+
+        Calculates:
+        - Incremental ROIC = ΔNOPAT / ΔInvested Capital
+        - Reinvestment Rate = (Capex - Depreciation + ΔNWC) / NOPAT
+        - FCF Conversion = FCF / Operating Income
+        - Operating Leverage = %Δ Operating Income / %Δ Revenue
+
+        Args:
+            income_statements: Annual income statements (most recent first).
+            balance_sheets: Annual balance sheets (most recent first).
+            cash_flows: Annual cash flow statements (most recent first).
+
+        Returns:
+            Dict with computed advanced metrics.
+        """
+        result: dict[str, Any] = {
+            "incremental_roic": None,
+            "reinvestment_rate": None,
+            "fcf_conversion": None,
+            "operating_leverage": None,
+            "interpretations": {},
+        }
+
+        if len(income_statements) < 2:
+            result["interpretations"]["data_issue"] = "Insufficient historical data"
+            return result
+
+        current_inc = income_statements[0]
+        prior_inc = income_statements[1]
+
+        # FCF Conversion = FCF / Operating Income
+        if cash_flows and income_statements:
+            current_cf = cash_flows[0] if cash_flows else {}
+            fcf = current_cf.get("freeCashFlow")
+            operating_income = current_inc.get("operatingIncome")
+
+            if fcf is not None and operating_income and operating_income > 0:
+                fcf_conversion = fcf / operating_income
+                result["fcf_conversion"] = round(fcf_conversion, 3)
+                if fcf_conversion > 1.0:
+                    result["interpretations"]["fcf_conversion"] = "Excellent - FCF exceeds operating income"
+                elif fcf_conversion > 0.8:
+                    result["interpretations"]["fcf_conversion"] = "Strong cash conversion"
+                elif fcf_conversion > 0.5:
+                    result["interpretations"]["fcf_conversion"] = "Moderate - some working capital drag"
+                elif fcf_conversion > 0:
+                    result["interpretations"]["fcf_conversion"] = "Weak - significant cash not reaching bottom line"
+                else:
+                    result["interpretations"]["fcf_conversion"] = "Negative - company consuming cash"
+
+        # Operating Leverage = %Δ Operating Income / %Δ Revenue
+        current_rev = current_inc.get("revenue")
+        prior_rev = prior_inc.get("revenue")
+        current_op_inc = current_inc.get("operatingIncome")
+        prior_op_inc = prior_inc.get("operatingIncome")
+
+        if all([current_rev, prior_rev, current_op_inc, prior_op_inc]):
+            if prior_rev > 0 and prior_op_inc > 0:
+                rev_growth = (current_rev - prior_rev) / prior_rev
+                op_inc_growth = (current_op_inc - prior_op_inc) / prior_op_inc
+
+                if rev_growth != 0:
+                    op_leverage = op_inc_growth / rev_growth
+                    result["operating_leverage"] = round(op_leverage, 2)
+
+                    if op_leverage > 2.0:
+                        result["interpretations"]["operating_leverage"] = "High leverage - profits grow much faster than revenue"
+                    elif op_leverage > 1.0:
+                        result["interpretations"]["operating_leverage"] = "Positive leverage - profit growth outpaces revenue"
+                    elif op_leverage > 0:
+                        result["interpretations"]["operating_leverage"] = "Low leverage - profit growth lags revenue"
+                    else:
+                        result["interpretations"]["operating_leverage"] = "Negative leverage - profits falling despite revenue changes"
+
+        # Incremental ROIC and Reinvestment Rate require balance sheet data
+        if len(balance_sheets) >= 2 and len(cash_flows) >= 1:
+            current_bs = balance_sheets[0]
+            prior_bs = balance_sheets[1]
+            current_cf = cash_flows[0]
+
+            # Calculate NOPAT (simplified: Operating Income * (1 - tax rate))
+            # Use effective tax rate from income statement
+            tax_expense = current_inc.get("incomeTaxExpense", 0) or 0
+            pretax_income = current_inc.get("incomeBeforeTax", 0) or 0
+            current_op_inc = current_inc.get("operatingIncome", 0) or 0
+            prior_op_inc = prior_inc.get("operatingIncome", 0) or 0
+
+            tax_rate = tax_expense / pretax_income if pretax_income > 0 else 0.25
+            current_nopat = current_op_inc * (1 - tax_rate)
+            prior_nopat = prior_op_inc * (1 - tax_rate)
+
+            # Invested Capital = Total Equity + Total Debt - Cash
+            def calc_invested_capital(bs: dict[str, Any]) -> float | None:
+                equity = bs.get("totalStockholdersEquity") or bs.get("totalEquity")
+                total_debt = bs.get("totalDebt", 0) or 0
+                cash = bs.get("cashAndCashEquivalents", 0) or 0
+                if equity is not None:
+                    return equity + total_debt - cash
+                return None
+
+            current_ic = calc_invested_capital(current_bs)
+            prior_ic = calc_invested_capital(prior_bs)
+
+            # Incremental ROIC = ΔNOPAT / ΔInvested Capital
+            if current_ic is not None and prior_ic is not None:
+                delta_nopat = current_nopat - prior_nopat
+                delta_ic = current_ic - prior_ic
+
+                if delta_ic != 0:
+                    incremental_roic = delta_nopat / delta_ic
+                    result["incremental_roic"] = round(incremental_roic, 3)
+
+                    if incremental_roic > 0.20:
+                        result["interpretations"]["incremental_roic"] = "Excellent - new investments earning strong returns"
+                    elif incremental_roic > 0.12:
+                        result["interpretations"]["incremental_roic"] = "Good - new investments creating value"
+                    elif incremental_roic > 0.08:
+                        result["interpretations"]["incremental_roic"] = "Adequate - covering cost of capital"
+                    elif incremental_roic > 0:
+                        result["interpretations"]["incremental_roic"] = "Weak - new investments may destroy value"
+                    else:
+                        result["interpretations"]["incremental_roic"] = "Negative - new investments destroying value"
+
+            # Reinvestment Rate = (Capex - Depreciation + ΔNWC) / NOPAT
+            capex = abs(current_cf.get("capitalExpenditure", 0) or 0)  # Usually negative in cash flows
+            depreciation = current_cf.get("depreciationAndAmortization", 0) or 0
+
+            # Net Working Capital change
+            def calc_nwc(bs: dict[str, Any]) -> float:
+                current_assets = bs.get("totalCurrentAssets", 0) or 0
+                current_liab = bs.get("totalCurrentLiabilities", 0) or 0
+                cash = bs.get("cashAndCashEquivalents", 0) or 0
+                # Exclude cash from current assets for operating NWC
+                return (current_assets - cash) - current_liab
+
+            current_nwc = calc_nwc(current_bs)
+            prior_nwc = calc_nwc(prior_bs)
+            delta_nwc = current_nwc - prior_nwc
+
+            if current_nopat > 0:
+                reinvestment_rate = (capex - depreciation + delta_nwc) / current_nopat
+                result["reinvestment_rate"] = round(reinvestment_rate, 3)
+
+                if reinvestment_rate > 0.6:
+                    result["interpretations"]["reinvestment_rate"] = "High reinvestment - growth mode"
+                elif reinvestment_rate > 0.3:
+                    result["interpretations"]["reinvestment_rate"] = "Moderate reinvestment"
+                elif reinvestment_rate > 0:
+                    result["interpretations"]["reinvestment_rate"] = "Low reinvestment - mature/returning cash"
+                else:
+                    result["interpretations"]["reinvestment_rate"] = "Negative - harvesting/shrinking"
+
+        return result
+
     def _compute_buyback_check(
         self,
         income_statements: list[dict[str, Any]],
@@ -1043,13 +1204,30 @@ class FMPClient:
         except DataFetchError as e:
             logger.warning("Failed to fetch financial scores", symbol=symbol, error=str(e))
 
-        # Fetch income statements for buyback check (need 2 years)
+        # Fetch financial statements for advanced metrics (need 2 years)
+        balance_sheets: list[dict[str, Any]] = []
+        cash_flows: list[dict[str, Any]] = []
+
         try:
             data, ev = await self.get_income_statement(symbol, period="annual", limit=2)
             income_statements = data
             evidence_ids.append(ev.evidence_id)
         except DataFetchError as e:
-            logger.warning("Failed to fetch income statements for buyback check", symbol=symbol, error=str(e))
+            logger.warning("Failed to fetch income statements", symbol=symbol, error=str(e))
+
+        try:
+            data, ev = await self.get_balance_sheet(symbol, period="annual", limit=2)
+            balance_sheets = data
+            evidence_ids.append(ev.evidence_id)
+        except DataFetchError as e:
+            logger.warning("Failed to fetch balance sheets for advanced metrics", symbol=symbol, error=str(e))
+
+        try:
+            data, ev = await self.get_cash_flow(symbol, period="annual", limit=2)
+            cash_flows = data
+            evidence_ids.append(ev.evidence_id)
+        except DataFetchError as e:
+            logger.warning("Failed to fetch cash flows for advanced metrics", symbol=symbol, error=str(e))
 
         # Helper to get value (TTM fields have TTM suffix)
         def get_ratio(field: str) -> Any:
@@ -1112,6 +1290,12 @@ class FMPClient:
         buyback_check = self._compute_buyback_check(income_statements)
         quant_metrics["buyback_check"] = buyback_check
 
+        # Compute advanced metrics (incremental ROIC, reinvestment rate, etc.)
+        advanced_metrics = self._compute_advanced_metrics(
+            income_statements, balance_sheets, cash_flows
+        )
+        quant_metrics["advanced_metrics"] = advanced_metrics
+
         # Compute red flags
         combined_ratios = {**ratios_ttm, **key_metrics_ttm}
         red_flags = self._compute_red_flags(combined_ratios, scores)
@@ -1119,6 +1303,15 @@ class FMPClient:
         # Add buyback flag if present
         if buyback_check.get("flag"):
             red_flags.append(buyback_check["flag"])
+
+        # Add advanced metrics flags
+        incremental_roic = advanced_metrics.get("incremental_roic")
+        if incremental_roic is not None and incremental_roic < 0.08:
+            red_flags.append(f"WARNING: Incremental ROIC of {incremental_roic:.1%} - new investments may destroy value")
+
+        fcf_conversion = advanced_metrics.get("fcf_conversion")
+        if fcf_conversion is not None and fcf_conversion < 0.5:
+            red_flags.append(f"WARNING: FCF conversion of {fcf_conversion:.1%} - weak cash generation")
 
         quant_metrics["red_flags"] = red_flags
 

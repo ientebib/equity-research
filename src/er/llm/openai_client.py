@@ -440,27 +440,11 @@ class OpenAIClient:
                 prompt_chars=prompt_chars,
                 max_output_tokens=request.max_tokens,
             )
-            print(f"\n{'='*60}")
-            print(f"OPENAI RESPONSES API CALL")
-            print(f"{'='*60}")
-            print(f"Model: {request.model}")
-            print(f"Reasoning Effort: {reasoning_effort}")
-            print(f"Prompt Size: ~{prompt_chars:,} chars")
-            print(f"Max Output Tokens: {request.max_tokens}")
-            print(f"Tool: web_search")
-            print(f"{'='*60}")
-            print(f"Waiting for response (this typically takes 2-5 minutes)...")
-            print(f"{'='*60}\n")
 
             # Make the synchronous Responses API call
             response = await self._client.responses.create(**params)
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
-
-            print(f"\n{'='*60}")
-            print(f"RESPONSE RECEIVED")
-            print(f"{'='*60}")
-            print(f"Latency: {latency_ms / 1000:.1f} seconds")
 
             logger.info(
                 "Web search completion finished",
@@ -468,26 +452,14 @@ class OpenAIClient:
                 latency_seconds=latency_ms / 1000,
             )
 
-            # Debug: print response structure
-            print(f"\nDEBUG: Response type: {type(response)}")
-            print(f"DEBUG: Response status: {getattr(response, 'status', 'N/A')}")
-            print(f"DEBUG: incomplete_details: {getattr(response, 'incomplete_details', 'N/A')}")
-            print(f"DEBUG: Has output_text: {hasattr(response, 'output_text')}")
-            if hasattr(response, 'output_text'):
-                print(f"DEBUG: output_text value: {repr(response.output_text)[:500]}")
-            print(f"DEBUG: Has output: {hasattr(response, 'output')}")
-            if hasattr(response, 'output') and response.output:
-                print(f"DEBUG: Output count: {len(response.output)}")
-                for idx, item in enumerate(response.output):
-                    print(f"DEBUG: Output[{idx}] type: {type(item).__name__}")
-                    if hasattr(item, 'type'):
-                        print(f"DEBUG: Output[{idx}].type: {item.type}")
-                    if hasattr(item, 'content') and item.content:
-                        print(f"DEBUG: Output[{idx}] content count: {len(item.content)}")
-                        for jdx, block in enumerate(item.content):
-                            print(f"DEBUG: Output[{idx}].content[{jdx}] type: {type(block).__name__}")
-                            if hasattr(block, 'text'):
-                                print(f"DEBUG: Output[{idx}].content[{jdx}].text: {repr(block.text)[:200]}")
+            # Debug response structure (only at debug level)
+            logger.debug(
+                "Web search response structure",
+                response_type=type(response).__name__,
+                status=getattr(response, "status", "N/A"),
+                has_output_text=hasattr(response, "output_text"),
+                output_count=len(response.output) if hasattr(response, "output") and response.output else 0,
+            )
 
             # Extract content using output_text property (simpler and more reliable)
             content = ""
@@ -502,11 +474,10 @@ class OpenAIClient:
                                 if hasattr(block, "text"):
                                     content += block.text
 
-            print(f"Extracted content length: {len(content)}")
-            if len(content) < 500:
-                print(f"Content preview: {content[:500]}")
-            else:
-                print(f"Content preview (first 500 chars): {content[:500]}...")
+            logger.debug(
+                "Web search content extracted",
+                content_length=len(content),
+            )
 
             # Extract usage
             input_tokens = 0
@@ -635,18 +606,24 @@ class OpenAIClient:
                 )
 
                 if status == "succeeded":
-                    # Extract the final output
+                    # Extract the final output - iterate ALL outputs and ALL content blocks
                     content = ""
                     annotations = []
 
-                    if result.output:
-                        last_output = result.output[-1]
-                        if hasattr(last_output, "content") and last_output.content:
-                            for item in last_output.content:
-                                if hasattr(item, "text"):
-                                    content = item.text
-                                if hasattr(item, "annotations"):
-                                    annotations = item.annotations
+                    # First try output_text property (simpler if available)
+                    if hasattr(result, "output_text") and result.output_text:
+                        content = result.output_text
+                    elif result.output:
+                        # Iterate through ALL output items (not just the last one!)
+                        for output_item in result.output:
+                            if hasattr(output_item, "content") and output_item.content:
+                                for block in output_item.content:
+                                    # Append text (not overwrite!)
+                                    if hasattr(block, "text"):
+                                        content += block.text
+                                    # Collect annotations from all blocks
+                                    if hasattr(block, "annotations"):
+                                        annotations.extend(block.annotations)
 
                     latency_ms = int(elapsed * 1000)
 
@@ -656,6 +633,15 @@ class OpenAIClient:
                     if hasattr(result, "usage") and result.usage:
                         input_tokens = getattr(result.usage, "input_tokens", 0)
                         output_tokens = getattr(result.usage, "output_tokens", 0)
+
+                    logger.debug(
+                        "Deep research completed",
+                        response_id=response_id,
+                        content_length=len(content),
+                        annotation_count=len(annotations),
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                    )
 
                     return LLMResponse(
                         content=content,

@@ -43,6 +43,10 @@ interface FullRunData {
 }
 
 function mapRun(run: Run, isActive: boolean): DisplayRun {
+  // Check if verdict has actual data (not just empty object)
+  const hasVerdict = run.verdict && run.verdict.investment_view;
+  const hasManifestVerdict = run.manifest?.final_verdict?.investment_view;
+
   return {
     id: run.run_id,
     ticker: run.ticker,
@@ -51,14 +55,14 @@ function mapRun(run: Run, isActive: boolean): DisplayRun {
     totalCost: run.total_cost || run.manifest?.total_cost_usd,
     currentStage: run.current_stage,
     isActive,
-    verdict: run.verdict ? {
+    verdict: hasVerdict ? {
       investmentView: run.verdict.investment_view,
       conviction: run.verdict.conviction,
       confidence: run.verdict.confidence
-    } : run.manifest?.final_verdict ? {
-      investmentView: run.manifest.final_verdict.investment_view,
-      conviction: run.manifest.final_verdict.conviction,
-      confidence: run.manifest.final_verdict.confidence
+    } : hasManifestVerdict ? {
+      investmentView: run.manifest!.final_verdict!.investment_view,
+      conviction: run.manifest!.final_verdict!.conviction,
+      confidence: run.manifest!.final_verdict!.confidence
     } : undefined
   };
 }
@@ -66,36 +70,49 @@ function mapRun(run: Run, isActive: boolean): DisplayRun {
 // ===================== COMPONENTS =====================
 
 function VerdictHero({ verdict, confidence, conviction }: { verdict: string; confidence: number; conviction?: string }) {
-  const isNegative = verdict.toUpperCase() === 'SELL';
+  const v = verdict.toUpperCase();
+  const isBuy = v === 'BUY';
+  const isSell = v === 'SELL';
+  const isHold = v === 'HOLD';
+
+  const colorClass = isBuy ? 'positive' : isSell ? 'negative' : 'warning';
+  const textColorClass = isBuy ? 'text-[var(--positive)]' : isSell ? 'text-[var(--negative)]' : 'text-[var(--warning)]';
 
   return (
-    <div className="mb-8 pb-8 border-b border-[var(--paper-darker)]">
-      <div className="flex items-end gap-8">
-        <div className={`text-7xl font-display font-black tracking-tight ${
-          isNegative ? 'text-[var(--signal)]' : 'text-[var(--ink)]'
-        }`}>
-          {verdict.toUpperCase()}
+    <div className="mb-10 pb-8 border-b border-[var(--border-subtle)]">
+      <div className="flex items-end gap-8 flex-wrap">
+        <div
+          className={`text-[5rem] md:text-[7rem] font-display font-extrabold tracking-tight leading-none ${textColorClass}`}
+          style={{
+            textShadow: isBuy
+              ? '0 0 60px var(--positive-glow)'
+              : isSell
+              ? '0 0 60px var(--negative-glow)'
+              : '0 0 60px var(--warning-muted)'
+          }}
+        >
+          {v}
         </div>
-        <div className="pb-2 space-y-3">
+        <div className="pb-3 space-y-4">
           {conviction && (
-            <div className={`inline-block px-3 py-1 text-xs font-mono uppercase tracking-wider ${
+            <div className={`inline-block px-3 py-1.5 text-xs font-mono uppercase tracking-wider rounded ${
               conviction.toLowerCase().includes('high')
-                ? 'bg-[var(--ink)] text-[var(--paper)]'
-                : 'border border-[var(--paper-darker)]'
+                ? 'bg-[var(--text-primary)] text-[var(--bg-void)]'
+                : 'border border-[var(--border-default)] text-[var(--text-secondary)]'
             }`}>
               {conviction}
             </div>
           )}
           <div>
-            <div className="text-label mb-1">CONFIDENCE</div>
-            <div className="flex items-center gap-3">
-              <div className="w-40 h-2 bg-[var(--paper-darker)]">
+            <div className="text-label mb-2">CONFIDENCE</div>
+            <div className="flex items-center gap-4">
+              <div className="w-48 h-2 bg-[var(--bg-hover)] rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-[var(--ink)] transition-all duration-1000"
+                  className={`h-full rounded-full confidence-bar-fill ${colorClass}`}
                   style={{ width: `${confidence * 100}%` }}
                 />
               </div>
-              <span className="text-data font-medium">{Math.round(confidence * 100)}%</span>
+              <span className="text-data font-semibold">{Math.round(confidence * 100)}%</span>
             </div>
           </div>
         </div>
@@ -113,19 +130,11 @@ function TabButton({ active, onClick, children, count }: {
   return (
     <button
       onClick={onClick}
-      className={`px-4 py-2.5 text-xs font-mono uppercase tracking-wider transition-all flex items-center gap-2 border-b-2 ${
-        active
-          ? 'border-[var(--ink)] text-[var(--ink)]'
-          : 'border-transparent text-[var(--ink-faded)] hover:text-[var(--ink)] hover:border-[var(--paper-darker)]'
-      }`}
+      className={`tab ${active ? 'active' : ''}`}
     >
       {children}
       {count !== undefined && count > 0 && (
-        <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
-          active ? 'bg-[var(--ink)] text-[var(--paper)]' : 'bg-[var(--paper-dark)]'
-        }`}>
-          {count}
-        </span>
+        <span className="tab-count">{count}</span>
       )}
     </button>
   );
@@ -145,43 +154,43 @@ function ThreadTypeSection({ type, threads }: { type: string; threads: any[] }) 
 
   return (
     <div className="mb-8">
-      <div className="flex items-baseline gap-3 mb-4 pb-2 border-b border-[var(--paper-darker)]">
-        <h3 className="text-sm font-mono uppercase tracking-wider">{info.label}</h3>
-        <span className="text-xs text-[var(--ink-ghost)]">{threads.length} threads</span>
+      <div className="flex items-baseline gap-3 mb-4 pb-3 border-b border-[var(--border-subtle)]">
+        <h3 className="text-sm font-mono uppercase tracking-wider text-[var(--text-primary)]">{info.label}</h3>
+        <span className="text-xs text-[var(--text-ghost)]">{threads.length} threads</span>
       </div>
 
       <div className="space-y-1">
         {threads.map((thread, i) => (
-          <div key={thread.thread_id || i}>
+          <div key={thread.thread_id || i} className="rounded-lg overflow-hidden">
             <button
               onClick={() => setExpanded(expanded === thread.thread_id ? null : thread.thread_id)}
-              className={`w-full text-left px-4 py-3 flex items-start gap-3 transition-colors ${
+              className={`w-full text-left px-4 py-3 flex items-start gap-3 transition-all ${
                 expanded === thread.thread_id
-                  ? 'bg-[var(--paper-dark)]'
-                  : 'hover:bg-[var(--paper-dark)]'
+                  ? 'bg-[var(--bg-elevated)]'
+                  : 'hover:bg-[var(--bg-elevated)]'
               }`}
             >
-              <span className="text-xs font-mono text-[var(--signal)] mt-0.5 shrink-0">
+              <span className="text-xs font-mono text-[var(--accent)] mt-0.5 shrink-0">
                 {String(i + 1).padStart(2, '0')}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium truncate">{thread.name}</div>
-                <div className="text-xs text-[var(--ink-faded)] mt-0.5">
+                <div className="text-sm font-medium text-[var(--text-primary)] truncate">{thread.name}</div>
+                <div className="text-xs text-[var(--text-muted)] mt-1">
                   {thread.research_questions?.length || 0} questions · Priority {thread.priority}
                 </div>
               </div>
-              <span className="text-[var(--ink-ghost)] text-sm shrink-0">
+              <span className="text-[var(--text-ghost)] text-sm shrink-0">
                 {expanded === thread.thread_id ? '−' : '+'}
               </span>
             </button>
 
             {expanded === thread.thread_id && (
-              <div className="px-4 pb-4 bg-[var(--paper-dark)] border-t border-[var(--paper-darker)]">
-                <div className="pt-4 pl-7 space-y-4">
+              <div className="px-4 pb-4 bg-[var(--bg-elevated)] border-t border-[var(--border-subtle)]">
+                <div className="pt-4 pl-8 space-y-4">
                   {thread.value_driver_hypothesis && (
                     <div>
-                      <div className="text-label mb-1">HYPOTHESIS</div>
-                      <p className="text-sm text-[var(--ink-light)]">{thread.value_driver_hypothesis}</p>
+                      <div className="text-label mb-2">HYPOTHESIS</div>
+                      <p className="text-sm text-[var(--text-secondary)]">{thread.value_driver_hypothesis}</p>
                     </div>
                   )}
 
@@ -191,8 +200,8 @@ function ThreadTypeSection({ type, threads }: { type: string; threads: any[] }) 
                       <div className="space-y-2">
                         {thread.research_questions.map((q: string, qi: number) => (
                           <div key={qi} className="flex gap-2 text-sm">
-                            <span className="text-[var(--signal)] shrink-0">→</span>
-                            <span className="text-[var(--ink-light)]">{q}</span>
+                            <span className="text-[var(--accent)] shrink-0">→</span>
+                            <span className="text-[var(--text-secondary)]">{q}</span>
                           </div>
                         ))}
                       </div>
@@ -231,19 +240,19 @@ function DiscoveryView({ discovery }: { discovery: Discovery }) {
   return (
     <div>
       {/* Summary stats */}
-      <div className="flex gap-6 mb-8 pb-6 border-b border-[var(--paper-darker)]">
-        <div>
-          <div className="text-2xl font-display font-bold">{discovery.research_threads?.length || 0}</div>
-          <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Research Threads</div>
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="data-card">
+          <div className="data-card-label">Research Threads</div>
+          <div className="data-card-value">{discovery.research_threads?.length || 0}</div>
         </div>
-        <div>
-          <div className="text-2xl font-display font-bold">{totalQuestions}</div>
-          <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Questions Asked</div>
+        <div className="data-card">
+          <div className="data-card-label">Questions Asked</div>
+          <div className="data-card-value">{totalQuestions}</div>
         </div>
         {discovery.official_segments && (
-          <div>
-            <div className="text-2xl font-display font-bold">{discovery.official_segments.length}</div>
-            <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Official Segments</div>
+          <div className="data-card">
+            <div className="data-card-label">Official Segments</div>
+            <div className="data-card-value">{discovery.official_segments.length}</div>
           </div>
         )}
       </div>
@@ -254,7 +263,7 @@ function DiscoveryView({ discovery }: { discovery: Discovery }) {
           <div className="text-label mb-3">OFFICIAL SEGMENTS</div>
           <div className="flex flex-wrap gap-2">
             {discovery.official_segments.map((seg, i) => (
-              <span key={i} className="px-3 py-1.5 text-xs font-mono bg-[var(--paper-dark)] border border-[var(--paper-darker)]">
+              <span key={i} className="px-3 py-1.5 text-xs font-mono bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded text-[var(--text-secondary)]">
                 {seg}
               </span>
             ))}
@@ -281,8 +290,7 @@ function parseTableOfContents(markdown: string): TocItem[] {
   const lines = markdown.split('\n');
   const toc: TocItem[] = [];
 
-  lines.forEach((line, i) => {
-    const h1Match = line.match(/^# (.+)$/);
+  lines.forEach((line) => {
     const h2Match = line.match(/^## (.+)$/);
     const h3Match = line.match(/^### (.+)$/);
 
@@ -302,7 +310,11 @@ function parseTableOfContents(markdown: string): TocItem[] {
 
 function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const toc = parseTableOfContents(report);
+
+  // Filter out the metadata table at the beginning (EQUITY RESEARCH REPORT table)
+  const cleanedReport = report.replace(/^#[^\n]*\n+\|[^|]*\|[^|]*\|\n\|[-:| ]+\|\n(\|[^\n]+\|\n)+/m, '');
 
   // Group TOC into main sections (h2) with subsections (h3)
   const groupedToc: { main: TocItem; subs: TocItem[] }[] = [];
@@ -317,61 +329,38 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
   const scrollToSection = (id: string) => {
     const element = document.getElementById(id);
     if (element) {
-      const offset = 120; // Account for sticky header
+      const offset = 120;
       const top = element.getBoundingClientRect().top + window.scrollY - offset;
       window.scrollTo({ top, behavior: 'smooth' });
       setActiveSection(id);
     }
   };
 
-  // Check if table has chartable revenue/growth data
-  const isChartableTable = (rows: any[]): { chartable: boolean; type: string } => {
-    if (rows.length < 2) return { chartable: false, type: '' };
-    const headers = rows[0]?.map((c: any) => String(c?.props?.children || c).toLowerCase()) || [];
+  // Track scroll position to highlight active section
+  useEffect(() => {
+    const handleScroll = () => {
+      const sections = toc.filter(t => t.level === 2).map(t => document.getElementById(t.id));
+      let current = '';
 
-    // Check for quarterly revenue table
-    if (headers.some((h: string) => h.includes('quarter')) &&
-        headers.some((h: string) => h.includes('revenue') || h.includes('growth'))) {
-      return { chartable: true, type: 'revenue' };
-    }
-    // Check for scenario table
-    if (headers.some((h: string) => h.includes('scenario'))) {
-      return { chartable: true, type: 'scenario' };
-    }
-    return { chartable: false, type: '' };
-  };
-
-  // Extract cell text
-  const getCellText = (cell: any): string => {
-    if (typeof cell === 'string') return cell;
-    if (cell?.props?.children) {
-      if (Array.isArray(cell.props.children)) {
-        return cell.props.children.map(getCellText).join('');
+      for (const section of sections) {
+        if (section) {
+          const rect = section.getBoundingClientRect();
+          if (rect.top <= 150) {
+            current = section.id;
+          }
+        }
       }
-      return getCellText(cell.props.children);
-    }
-    return String(cell || '');
-  };
 
-  // Parse revenue value like "$56.6B" to number
-  const parseRevenue = (str: string): number => {
-    const match = str.match(/\$?([\d.]+)\s*(B|M|K)?/i);
-    if (!match) return 0;
-    const num = parseFloat(match[1]);
-    const mult = match[2]?.toUpperCase();
-    if (mult === 'B') return num * 1000;
-    if (mult === 'M') return num;
-    if (mult === 'K') return num / 1000;
-    return num;
-  };
+      if (current && current !== activeSection) {
+        setActiveSection(current);
+      }
+    };
 
-  // Parse percentage like "+15%" to number
-  const parseGrowth = (str: string): number => {
-    const match = str.match(/([+-]?\d+(?:\.\d+)?)\s*%/);
-    return match ? parseFloat(match[1]) : 0;
-  };
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [activeSection, toc]);
 
-  // Custom renderer to add IDs to headings and charts to tables
+  // Custom renderer for better styling
   const components = {
     h2: ({ children, ...props }: any) => {
       const text = String(children);
@@ -391,117 +380,103 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
         </h3>
       );
     },
-    table: ({ children, ...props }: any) => {
-      // Extract rows from table
-      const rows: any[] = [];
-      const processChildren = (node: any) => {
-        if (!node) return;
-        if (Array.isArray(node)) {
-          node.forEach(processChildren);
-        } else if (node?.type === 'thead' || node?.type === 'tbody') {
-          processChildren(node.props?.children);
-        } else if (node?.type === 'tr') {
-          const cells = Array.isArray(node.props?.children)
-            ? node.props.children
-            : [node.props?.children];
-          rows.push(cells.filter(Boolean));
-        }
-      };
-      processChildren(children);
+    // Better table rendering with visual pop
+    table: ({ children, ...props }: any) => (
+      <div className="my-8 rounded-xl overflow-hidden shadow-[0_4px_24px_rgba(0,0,0,0.2),0_0_0_1px_var(--border-subtle)] hover:shadow-[0_8px_32px_rgba(0,0,0,0.3),0_0_0_1px_var(--border-default)] transition-shadow duration-300">
+        <table className="w-full" {...props}>{children}</table>
+      </div>
+    ),
+    thead: ({ children, ...props }: any) => (
+      <thead className="bg-gradient-to-b from-[var(--bg-elevated)] to-[var(--bg-active)]" {...props}>{children}</thead>
+    ),
+    tbody: ({ children, ...props }: any) => (
+      <tbody className="bg-[var(--bg-surface)] [&>tr:nth-child(even)]:bg-[var(--bg-elevated)] [&>tr:hover]:bg-[var(--accent-muted)] [&>tr]:transition-colors" {...props}>{children}</tbody>
+    ),
+    th: ({ children, ...props }: any) => (
+      <th className="px-5 py-4 text-left text-[10px] font-mono font-semibold uppercase tracking-widest text-[var(--accent-bright)] border-b-2 border-[var(--accent)] whitespace-nowrap" {...props}>
+        {children}
+      </th>
+    ),
+    td: ({ children, ...props }: any) => {
+      const text = String(children);
+      // Enhanced color-coding for financial data
+      const isStrongPositive = text.includes('BUY') || text.includes('Outperform') || text.includes('Strong');
+      const isPositive = text.includes('+') || text.includes('high') || text.includes('bullish') || text.toLowerCase().includes('growth');
+      const isNegative = text.includes('SELL') || text.includes('bear') || text.includes('risk') || text.includes('decline') || (text.includes('-') && /[\d]/.test(text));
+      const isNumber = /^\$?-?[\d,]+\.?\d*[BMK%]?$/.test(text.trim());
+      const isCurrency = text.startsWith('$') || text.includes('USD');
+      const isPercent = text.includes('%');
 
-      const { chartable, type } = isChartableTable(rows);
+      let colorClass = 'text-[var(--text-secondary)]';
+      if (isStrongPositive) colorClass = 'text-[var(--positive)] font-bold bg-[var(--positive-muted)] px-2 py-0.5 rounded inline-block';
+      else if (isPositive && !isNegative) colorClass = 'text-[var(--positive)] font-medium';
+      else if (isNegative) colorClass = 'text-[var(--negative)] font-medium';
+      else if (isCurrency || isNumber) colorClass = 'font-mono text-[var(--text-primary)] tabular-nums';
+      else if (isPercent) colorClass = 'font-mono font-medium text-[var(--text-primary)]';
 
-      if (chartable && type === 'revenue' && rows.length > 1) {
-        // Parse the data
-        const headers = rows[0].map(getCellText);
-        const revenueIdx = headers.findIndex((h: string) => h.toLowerCase().includes('revenue'));
-        const growthIdx = headers.findIndex((h: string) => h.toLowerCase().includes('growth'));
-        const labelIdx = 0;
-
-        const data = rows.slice(1).map(row => ({
-          label: getCellText(row[labelIdx]),
-          revenue: revenueIdx >= 0 ? parseRevenue(getCellText(row[revenueIdx])) : 0,
-          growth: growthIdx >= 0 ? parseGrowth(getCellText(row[growthIdx])) : 0,
-          revenueStr: revenueIdx >= 0 ? getCellText(row[revenueIdx]) : '',
-          growthStr: growthIdx >= 0 ? getCellText(row[growthIdx]) : '',
-        }));
-
-        const maxRevenue = Math.max(...data.map(d => d.revenue));
-
-        return (
-          <div className="my-6 p-4 bg-[var(--paper-dark)] border border-[var(--paper-darker)]">
-            <div className="space-y-3">
-              {data.map((d, i) => (
-                <div key={i} className="flex items-center gap-4">
-                  <div className="w-20 text-xs font-mono text-[var(--ink-faded)] shrink-0">{d.label}</div>
-                  <div className="flex-1 flex items-center gap-2">
-                    <div className="flex-1 h-6 bg-[var(--paper-darker)] relative overflow-hidden">
-                      <div
-                        className="h-full bg-[var(--ink)] transition-all duration-500"
-                        style={{ width: `${(d.revenue / maxRevenue) * 100}%` }}
-                      />
-                    </div>
-                    <span className="text-sm font-mono w-16 text-right">{d.revenueStr}</span>
-                    {d.growthStr && (
-                      <span className={`text-xs font-mono w-12 text-right ${
-                        d.growth > 0 ? 'text-[#2d5a27]' : d.growth < 0 ? 'text-[var(--signal)]' : ''
-                      }`}>
-                        {d.growthStr}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      }
-
-      // Default table rendering with better styling
       return (
-        <div className="my-6 overflow-x-auto">
-          <table className="w-full" {...props}>{children}</table>
-        </div>
+        <td className={`px-5 py-3.5 text-sm ${colorClass}`} {...props}>
+          {children}
+        </td>
       );
     },
+    // Better list styling
+    ul: ({ children, ...props }: any) => (
+      <ul className="my-4 space-y-3 list-disc list-outside pl-6" {...props}>{children}</ul>
+    ),
+    li: ({ children, ...props }: any) => (
+      <li className="text-[var(--text-secondary)] marker:text-[var(--accent)]" {...props}>
+        {children}
+      </li>
+    ),
+    // Better blockquotes
+    blockquote: ({ children, ...props }: any) => (
+      <blockquote className="my-6 pl-4 border-l-2 border-[var(--accent)] bg-[var(--accent-muted)] py-3 pr-4 rounded-r-lg" {...props}>
+        {children}
+      </blockquote>
+    ),
+    // Better strong/bold
+    strong: ({ children, ...props }: any) => (
+      <strong className="font-semibold text-[var(--text-primary)]" {...props}>{children}</strong>
+    ),
   };
 
   return (
-    <div className="flex gap-8">
-      {/* Sticky TOC Sidebar */}
-      <nav className="hidden lg:block w-64 shrink-0">
-        <div className="sticky top-32 max-h-[calc(100vh-160px)] overflow-y-auto pr-4">
-          <div className="text-label mb-4">CONTENTS</div>
-          <div className="space-y-1">
+    <div className="flex gap-10 relative">
+      {/* Sticky TOC Sidebar - Now properly sticky */}
+      <nav className="hidden lg:block w-56 shrink-0">
+        <div className="sticky top-28 max-h-[calc(100vh-140px)] overflow-y-auto scrollbar-thin pr-2">
+          <div className="text-[10px] font-mono uppercase tracking-widest text-[var(--text-ghost)] mb-4">Contents</div>
+          <div className="space-y-0.5">
             {groupedToc.map(({ main, subs }) => (
               <div key={main.id}>
                 <button
                   onClick={() => scrollToSection(main.id)}
-                  className={`w-full text-left py-1.5 text-sm transition-colors ${
+                  className={`w-full text-left py-1.5 text-xs transition-all rounded px-2 -mx-2 ${
                     activeSection === main.id
-                      ? 'text-[var(--ink)] font-medium'
-                      : 'text-[var(--ink-faded)] hover:text-[var(--ink)]'
+                      ? 'text-[var(--text-primary)] bg-[var(--bg-elevated)] font-medium'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
                   }`}
                 >
                   {main.text}
                 </button>
                 {subs.length > 0 && (
-                  <div className="ml-3 border-l border-[var(--paper-darker)] pl-3 space-y-0.5">
-                    {subs.slice(0, 5).map(sub => (
+                  <div className="ml-2 border-l border-[var(--border-subtle)] pl-2 mt-1 mb-2 space-y-0.5">
+                    {subs.slice(0, 6).map(sub => (
                       <button
                         key={sub.id}
                         onClick={() => scrollToSection(sub.id)}
-                        className={`w-full text-left py-1 text-xs transition-colors truncate ${
+                        className={`w-full text-left py-1 text-[11px] transition-colors truncate ${
                           activeSection === sub.id
-                            ? 'text-[var(--ink)]'
-                            : 'text-[var(--ink-ghost)] hover:text-[var(--ink-faded)]'
+                            ? 'text-[var(--text-secondary)]'
+                            : 'text-[var(--text-ghost)] hover:text-[var(--text-muted)]'
                         }`}
                       >
                         {sub.text}
                       </button>
                     ))}
-                    {subs.length > 5 && (
-                      <span className="text-xs text-[var(--ink-ghost)]">+{subs.length - 5} more</span>
+                    {subs.length > 6 && (
+                      <span className="text-[10px] text-[var(--text-ghost)] pl-1">+{subs.length - 6} more</span>
                     )}
                   </div>
                 )}
@@ -512,22 +487,22 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
       </nav>
 
       {/* Main content */}
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0" ref={contentRef}>
         {/* Thesis callout */}
         {thesis && (
-          <div className="mb-8 p-6 bg-[var(--paper-dark)] border-l-4 border-[var(--signal)]">
-            <div className="text-label mb-2">INVESTMENT THESIS</div>
-            <p className="text-lg text-[var(--ink-light)] leading-relaxed">{thesis}</p>
+          <div className="mb-10 p-6 bg-gradient-to-r from-[var(--accent-muted)] to-transparent border-l-4 border-[var(--accent)] rounded-r-lg">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-[var(--accent)] mb-3">Investment Thesis</div>
+            <p className="text-lg text-[var(--text-primary)] leading-relaxed font-medium">{thesis}</p>
           </div>
         )}
 
         {/* Mobile TOC dropdown */}
-        <div className="lg:hidden mb-6">
-          <details className="border border-[var(--paper-darker)]">
-            <summary className="px-4 py-3 cursor-pointer text-sm font-mono uppercase tracking-wider">
+        <div className="lg:hidden mb-8">
+          <details className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+            <summary className="px-4 py-3 cursor-pointer text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">
               Jump to section
             </summary>
-            <div className="px-4 pb-4 max-h-64 overflow-y-auto">
+            <div className="px-4 pb-4 max-h-64 overflow-y-auto border-t border-[var(--border-subtle)]">
               {groupedToc.map(({ main }) => (
                 <button
                   key={main.id}
@@ -535,7 +510,7 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
                     scrollToSection(main.id);
                     (document.activeElement as HTMLElement)?.blur();
                   }}
-                  className="block w-full text-left py-2 text-sm text-[var(--ink-faded)] hover:text-[var(--ink)]"
+                  className="block w-full text-left py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
                 >
                   {main.text}
                 </button>
@@ -545,9 +520,9 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
         </div>
 
         {/* Report content */}
-        <article className="prose">
+        <article className="prose prose-report">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-            {report}
+            {cleanedReport}
           </ReactMarkdown>
         </article>
       </div>
@@ -569,30 +544,23 @@ function VerticalsView({ verticals }: { verticals: VerticalAnalysis[] }) {
 
   const threadIds = Object.keys(grouped);
 
-  // Calculate average confidence per thread
-  const threadStats = threadIds.map(tid => {
-    const items = grouped[tid];
-    const avgConf = items.reduce((sum, v) => sum + (v.overall_confidence || 0), 0) / items.length;
-    return { tid, count: items.length, avgConfidence: avgConf };
-  });
-
   return (
     <div>
       {/* Summary */}
-      <div className="flex gap-6 mb-8 pb-6 border-b border-[var(--paper-darker)]">
-        <div>
-          <div className="text-2xl font-display font-bold">{verticals.length}</div>
-          <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Vertical Analyses</div>
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="data-card">
+          <div className="data-card-label">Vertical Analyses</div>
+          <div className="data-card-value">{verticals.length}</div>
         </div>
-        <div>
-          <div className="text-2xl font-display font-bold">{threadIds.length}</div>
-          <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Research Threads</div>
+        <div className="data-card">
+          <div className="data-card-label">Research Threads</div>
+          <div className="data-card-value">{threadIds.length}</div>
         </div>
-        <div>
-          <div className="text-2xl font-display font-bold">
+        <div className="data-card">
+          <div className="data-card-label">Avg Confidence</div>
+          <div className="data-card-value">
             {Math.round(verticals.reduce((s, v) => s + (v.overall_confidence || 0), 0) / verticals.length * 100)}%
           </div>
-          <div className="text-xs text-[var(--ink-faded)] uppercase tracking-wider">Avg Confidence</div>
         </div>
       </div>
 
@@ -603,73 +571,73 @@ function VerticalsView({ verticals }: { verticals: VerticalAnalysis[] }) {
         const firstItem = items[0];
 
         return (
-          <div key={tid} className="mb-4">
+          <div key={tid} className="mb-3">
             {/* Thread header */}
             <button
               onClick={() => setExpandedThread(isThreadExpanded ? null : tid)}
-              className={`w-full text-left p-4 border transition-colors ${
+              className={`w-full text-left p-4 rounded-lg border transition-all ${
                 isThreadExpanded
-                  ? 'border-[var(--ink)] bg-[var(--paper-dark)]'
-                  : 'border-[var(--paper-darker)] hover:border-[var(--ink-faded)]'
+                  ? 'border-[var(--accent)] bg-[var(--bg-elevated)]'
+                  : 'border-[var(--border-subtle)] hover:border-[var(--border-default)] bg-[var(--bg-surface)]'
               }`}
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-mono text-[var(--signal)]">
+                    <span className="text-xs font-mono text-[var(--accent)]">
                       Thread {String(tIdx + 1).padStart(2, '0')}
                     </span>
-                    <span className="text-xs text-[var(--ink-ghost)]">·</span>
-                    <span className="text-xs text-[var(--ink-faded)]">{items.length} analyses</span>
+                    <span className="text-xs text-[var(--text-ghost)]">·</span>
+                    <span className="text-xs text-[var(--text-muted)]">{items.length} analyses</span>
                   </div>
-                  <div className="text-sm font-medium">{firstItem.vertical_name?.split(':')[0] || `Thread ${tIdx + 1}`}</div>
+                  <div className="text-sm font-medium text-[var(--text-primary)]">{firstItem.vertical_name?.split(':')[0] || `Thread ${tIdx + 1}`}</div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-4">
                   <div className="text-right">
-                    <div className="text-xs text-[var(--ink-ghost)]">Confidence</div>
-                    <div className="text-sm font-mono font-medium">
+                    <div className="text-xs text-[var(--text-ghost)]">Confidence</div>
+                    <div className="text-sm font-mono font-medium text-[var(--text-primary)]">
                       {Math.round(items.reduce((s, v) => s + (v.overall_confidence || 0), 0) / items.length * 100)}%
                     </div>
                   </div>
-                  <span className="text-[var(--ink-ghost)]">{isThreadExpanded ? '−' : '+'}</span>
+                  <span className="text-[var(--text-ghost)]">{isThreadExpanded ? '−' : '+'}</span>
                 </div>
               </div>
             </button>
 
             {/* Expanded content */}
             {isThreadExpanded && (
-              <div className="border-x border-b border-[var(--paper-darker)] bg-[var(--paper)]">
+              <div className="mt-1 border border-[var(--border-subtle)] rounded-lg overflow-hidden bg-[var(--bg-surface)]">
                 {items.map((v, vIdx) => {
                   const vertKey = `${tid}-${vIdx}`;
                   const isVertExpanded = expandedVertical === vertKey;
 
                   return (
-                    <div key={vIdx} className="border-b border-[var(--paper-darker)] last:border-b-0">
+                    <div key={vIdx} className="border-b border-[var(--border-subtle)] last:border-b-0">
                       <button
                         onClick={() => setExpandedVertical(isVertExpanded ? null : vertKey)}
                         className={`w-full text-left px-4 py-3 flex items-center gap-3 ${
-                          isVertExpanded ? 'bg-[var(--paper-dark)]' : 'hover:bg-[var(--paper-dark)]'
+                          isVertExpanded ? 'bg-[var(--bg-elevated)]' : 'hover:bg-[var(--bg-elevated)]'
                         }`}
                       >
-                        <span className="text-xs font-mono text-[var(--ink-ghost)]">{vIdx + 1}</span>
+                        <span className="text-xs font-mono text-[var(--text-ghost)]">{vIdx + 1}</span>
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm truncate">{v.vertical_name}</div>
+                          <div className="text-sm truncate text-[var(--text-secondary)]">{v.vertical_name}</div>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="w-16 h-1.5 bg-[var(--paper-darker)]">
+                        <div className="flex items-center gap-3 shrink-0">
+                          <div className="w-20 h-1.5 bg-[var(--bg-hover)] rounded-full overflow-hidden">
                             <div
-                              className="h-full bg-[var(--ink)]"
+                              className="h-full bg-[var(--accent)] rounded-full"
                               style={{ width: `${(v.overall_confidence || 0) * 100}%` }}
                             />
                           </div>
-                          <span className="text-xs font-mono w-8">{Math.round((v.overall_confidence || 0) * 100)}%</span>
-                          <span className="text-[var(--ink-ghost)] text-sm">{isVertExpanded ? '−' : '+'}</span>
+                          <span className="text-xs font-mono w-10 text-[var(--text-muted)]">{Math.round((v.overall_confidence || 0) * 100)}%</span>
+                          <span className="text-[var(--text-ghost)] text-sm">{isVertExpanded ? '−' : '+'}</span>
                         </div>
                       </button>
 
                       {isVertExpanded && v.business_understanding && (
-                        <div className="px-4 pb-4 bg-[var(--paper-dark)]">
-                          <div className="pl-6 pt-2 prose prose-sm max-w-none">
+                        <div className="px-4 pb-4 bg-[var(--bg-elevated)]">
+                          <div className="pl-7 pt-2 prose prose-sm max-w-none">
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
                               {v.business_understanding}
                             </ReactMarkdown>
@@ -700,48 +668,54 @@ function SynthesisCompare({ claude, gpt, winner }: {
   const current = selected === 'claude' ? claude : gpt;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {/* Selector */}
-      <div className="flex gap-2">
+      <div className="grid grid-cols-2 gap-3">
         {claude && (
           <button
             onClick={() => setSelected('claude')}
-            className={`flex-1 p-3 border transition-colors ${
+            className={`p-4 rounded-lg border text-left transition-all ${
               selected === 'claude'
-                ? 'border-[var(--ink)] bg-[var(--ink)] text-[var(--paper)]'
-                : 'border-[var(--paper-darker)] hover:border-[var(--ink-faded)]'
+                ? 'border-[var(--accent)] bg-[var(--accent-muted)]'
+                : 'border-[var(--border-subtle)] hover:border-[var(--border-default)]'
             }`}
           >
-            <div className="text-xs font-mono uppercase tracking-wider mb-1">
-              Claude {winner === 'claude' && '★'}
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">Claude</span>
+              {winner === 'claude' && (
+                <span className="text-xs px-1.5 py-0.5 bg-[var(--positive-muted)] text-[var(--positive)] rounded">Winner</span>
+              )}
             </div>
-            <div className="text-lg font-display font-bold">{claude.investment_view}</div>
-            <div className="text-xs mt-1 opacity-70">{Math.round(claude.confidence * 100)}% confidence</div>
+            <div className="text-xl font-display font-bold text-[var(--text-primary)]">{claude.investment_view}</div>
+            <div className="text-xs mt-1 text-[var(--text-muted)]">{Math.round(claude.confidence * 100)}% confidence</div>
           </button>
         )}
         {gpt && (
           <button
             onClick={() => setSelected('gpt')}
-            className={`flex-1 p-3 border transition-colors ${
+            className={`p-4 rounded-lg border text-left transition-all ${
               selected === 'gpt'
-                ? 'border-[var(--ink)] bg-[var(--ink)] text-[var(--paper)]'
-                : 'border-[var(--paper-darker)] hover:border-[var(--ink-faded)]'
+                ? 'border-[var(--accent)] bg-[var(--accent-muted)]'
+                : 'border-[var(--border-subtle)] hover:border-[var(--border-default)]'
             }`}
           >
-            <div className="text-xs font-mono uppercase tracking-wider mb-1">
-              GPT {winner === 'gpt' && '★'}
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">GPT</span>
+              {winner === 'gpt' && (
+                <span className="text-xs px-1.5 py-0.5 bg-[var(--positive-muted)] text-[var(--positive)] rounded">Winner</span>
+              )}
             </div>
-            <div className="text-lg font-display font-bold">{gpt.investment_view}</div>
-            <div className="text-xs mt-1 opacity-70">{Math.round(gpt.confidence * 100)}% confidence</div>
+            <div className="text-xl font-display font-bold text-[var(--text-primary)]">{gpt.investment_view}</div>
+            <div className="text-xs mt-1 text-[var(--text-muted)]">{Math.round(gpt.confidence * 100)}% confidence</div>
           </button>
         )}
       </div>
 
       {/* Thesis */}
       {current?.thesis_summary && (
-        <div className="p-4 bg-[var(--paper-dark)]">
+        <div className="p-4 bg-[var(--bg-elevated)] rounded-lg">
           <div className="text-label mb-2">THESIS</div>
-          <p className="text-body">{current.thesis_summary}</p>
+          <p className="text-body-lg">{current.thesis_summary}</p>
         </div>
       )}
 
@@ -761,15 +735,15 @@ function CostBar({ label, value, total }: { label: string; value: number; total:
   const percentage = (value / total) * 100;
 
   return (
-    <div className="flex items-center gap-4">
-      <span className="w-28 text-xs font-mono text-[var(--ink-faded)] truncate">{label}</span>
-      <div className="flex-1 h-3 bg-[var(--paper-dark)]">
+    <div className="data-bar">
+      <span className="data-bar-label truncate">{label}</span>
+      <div className="data-bar-track">
         <div
-          className="h-full bg-[var(--ink)] transition-all duration-700"
+          className="data-bar-fill bg-[var(--accent)]"
           style={{ width: `${Math.min(percentage, 100)}%` }}
         />
       </div>
-      <span className="w-16 text-right text-xs font-mono">${value.toFixed(2)}</span>
+      <span className="data-bar-value">${value.toFixed(2)}</span>
     </div>
   );
 }
@@ -778,24 +752,22 @@ function Collapsible({ title, children, defaultOpen = false }: { title: string; 
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <div className="border border-[var(--paper-darker)] mb-4">
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full px-4 py-3 flex items-center justify-between text-sm font-mono uppercase tracking-wider hover:bg-[var(--paper-dark)] transition-colors"
-      >
-        {title}
-        <span className="text-[var(--ink-ghost)]">{isOpen ? '−' : '+'}</span>
+    <div className={`collapsible mb-4 ${isOpen ? 'open' : ''}`}>
+      <button onClick={() => setIsOpen(!isOpen)} className="collapsible-trigger">
+        <span className="collapsible-title">{title}</span>
+        <span className="collapsible-icon">{isOpen ? '−' : '+'}</span>
       </button>
-      {isOpen && <div className="px-4 pb-4">{children}</div>}
+      {isOpen && <div className="collapsible-content">{children}</div>}
     </div>
   );
 }
 
-// ===================== FINANCIALS VIEW =====================
+// ===================== DATA VISUALIZATION COMPONENTS =====================
 
 function formatCurrency(value: number): string {
+  if (Math.abs(value) >= 1e12) return `$${(value / 1e12).toFixed(1)}T`;
   if (Math.abs(value) >= 1e9) return `$${(value / 1e9).toFixed(1)}B`;
-  if (Math.abs(value) >= 1e6) return `$${(value / 1e6).toFixed(0)}M`;
+  if (Math.abs(value) >= 1e6) return `$${(value / 1e6).toFixed(1)}M`;
   if (Math.abs(value) >= 1e3) return `$${(value / 1e3).toFixed(0)}K`;
   return `$${value.toFixed(0)}`;
 }
@@ -804,81 +776,191 @@ function formatPercent(value: number): string {
   return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`;
 }
 
-function MetricBar({ label, value, maxValue, subtext, growth }: {
-  label: string;
-  value: number;
-  maxValue: number;
-  subtext?: string;
-  growth?: number;
+function formatCompact(value: number): string {
+  if (Math.abs(value) >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
+  if (Math.abs(value) >= 1e6) return `${(value / 1e6).toFixed(0)}M`;
+  return value.toFixed(0);
+}
+
+// Mini sparkline component for inline trends
+function Sparkline({ data, color = 'var(--accent)', height = 24, width = 80 }: {
+  data: number[];
+  color?: string;
+  height?: number;
+  width?: number;
 }) {
-  const width = maxValue > 0 ? (value / maxValue) * 100 : 0;
+  if (!data || data.length < 2) return null;
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+
+  const points = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * width;
+    const y = height - ((v - min) / range) * height;
+    return `${x},${y}`;
+  }).join(' ');
+
+  const lastValue = data[data.length - 1];
+  const firstValue = data[0];
+  const trend = lastValue >= firstValue ? 'positive' : 'negative';
+  const actualColor = color === 'auto'
+    ? (trend === 'positive' ? 'var(--positive)' : 'var(--negative)')
+    : color;
 
   return (
-    <div className="group">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-mono text-[var(--ink-faded)] uppercase tracking-wider">{label}</span>
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-mono">{formatCurrency(value)}</span>
-          {growth !== undefined && (
-            <span className={`text-xs font-mono ${growth >= 0 ? 'text-[#2d5a27]' : 'text-[var(--signal)]'}`}>
-              {formatPercent(growth)}
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="h-6 bg-[var(--paper-dark)] relative overflow-hidden">
-        <div
-          className="h-full bg-[var(--ink)] transition-all duration-700 ease-out"
-          style={{ width: `${width}%` }}
-        />
-        {subtext && (
-          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-mono text-[var(--ink-ghost)] opacity-0 group-hover:opacity-100 transition-opacity">
-            {subtext}
-          </span>
+    <svg width={width} height={height} className="overflow-visible">
+      <polyline
+        points={points}
+        fill="none"
+        stroke={actualColor}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle
+        cx={(data.length - 1) / (data.length - 1) * width}
+        cy={height - ((lastValue - min) / range) * height}
+        r="2"
+        fill={actualColor}
+      />
+    </svg>
+  );
+}
+
+// Animated number counter
+function AnimatedNumber({ value, prefix = '', suffix = '', decimals = 0 }: {
+  value: number;
+  prefix?: string;
+  suffix?: string;
+  decimals?: number;
+}) {
+  const [display, setDisplay] = useState(0);
+
+  useEffect(() => {
+    const duration = 800;
+    const steps = 30;
+    const increment = value / steps;
+    let current = 0;
+
+    const timer = setInterval(() => {
+      current += increment;
+      if (current >= value) {
+        setDisplay(value);
+        clearInterval(timer);
+      } else {
+        setDisplay(current);
+      }
+    }, duration / steps);
+
+    return () => clearInterval(timer);
+  }, [value]);
+
+  return <span>{prefix}{display.toFixed(decimals)}{suffix}</span>;
+}
+
+// Enhanced metric card with sparkline
+function MetricCard({
+  label,
+  value,
+  trend,
+  sparklineData,
+  format = 'number',
+  prefix = '',
+  suffix = '',
+  decimals = 0,
+  size = 'md'
+}: {
+  label: string;
+  value: number;
+  trend?: number;
+  sparklineData?: number[];
+  format?: 'currency' | 'percent' | 'number' | 'compact';
+  prefix?: string;
+  suffix?: string;
+  decimals?: number;
+  size?: 'sm' | 'md' | 'lg';
+}) {
+  const formattedValue = format === 'currency'
+    ? formatCurrency(value)
+    : format === 'percent'
+    ? `${(value * 100).toFixed(decimals)}%`
+    : format === 'compact'
+    ? formatCompact(value)
+    : value.toFixed(decimals);
+
+  const displayValue = `${prefix}${formattedValue}${suffix}`;
+
+  const sizeClasses = {
+    sm: 'p-3',
+    md: 'p-4',
+    lg: 'p-5'
+  };
+
+  const valueSizes = {
+    sm: 'text-lg',
+    md: 'text-2xl',
+    lg: 'text-3xl'
+  };
+
+  return (
+    <div className={`bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-lg ${sizeClasses[size]} hover:border-[var(--border-default)] transition-all group`}>
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <span className="text-[10px] font-mono text-[var(--text-muted)] uppercase tracking-wider">{label}</span>
+        {sparklineData && sparklineData.length > 1 && (
+          <Sparkline data={sparklineData} color="auto" height={20} width={50} />
         )}
       </div>
+      <div className={`font-mono font-semibold text-[var(--text-primary)] ${valueSizes[size]}`}>
+        {displayValue}
+      </div>
+      {trend !== undefined && (
+        <div className={`mt-1 text-xs font-mono ${trend >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}`}>
+          {formatPercent(trend)} <span className="text-[var(--text-ghost)]">vs prior</span>
+        </div>
+      )}
     </div>
   );
 }
 
-function QuarterlyChart({ data, metric, title }: {
-  data: IncomeStatement[];
-  metric: keyof IncomeStatement;
-  title: string;
+// Waterfall chart for profitability breakdown
+function WaterfallChart({ items }: {
+  items: { label: string; value: number; color?: string }[];
 }) {
-  if (!data || data.length === 0) return null;
-
-  // Get last 8 quarters, reverse for chronological order
-  const quarters = [...data].slice(0, 8).reverse();
-  const values = quarters.map(q => Number(q[metric]) || 0);
-  const maxValue = Math.max(...values.filter(v => v > 0));
+  const maxValue = Math.max(...items.map(i => Math.abs(i.value)));
 
   return (
-    <div className="mb-8">
-      <div className="text-label mb-4">{title}</div>
-      <div className="flex items-end gap-1 h-32">
-        {quarters.map((q, i) => {
-          const value = Number(q[metric]) || 0;
-          const height = maxValue > 0 ? (value / maxValue) * 100 : 0;
-          const prevValue = i > 0 ? (Number(quarters[i-1][metric]) || 0) : value;
-          const growth = prevValue > 0 ? (value - prevValue) / prevValue : 0;
+    <div className="mb-8 p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg">
+      <div className="text-label mb-6">PROFITABILITY WATERFALL</div>
+      <div className="space-y-4">
+        {items.map((item, i) => {
+          const width = maxValue > 0 ? (Math.abs(item.value) / maxValue) * 100 : 0;
+          const isNegative = item.value < 0;
+          const color = item.color || 'var(--accent)';
 
           return (
-            <div key={q.date} className="flex-1 flex flex-col items-center group">
-              <div className="w-full flex flex-col items-center justify-end h-24">
-                <div
-                  className={`w-full transition-all duration-500 ${
-                    growth >= 0 ? 'bg-[var(--ink)]' : 'bg-[var(--ink-faded)]'
-                  } group-hover:bg-[var(--signal)]`}
-                  style={{ height: `${height}%`, minHeight: value > 0 ? '4px' : '0' }}
-                />
+            <div key={i} className="group">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-mono text-[var(--text-muted)] uppercase tracking-wider">{item.label}</span>
+                <span className={`text-sm font-mono font-semibold ${isNegative ? 'text-[var(--negative)]' : 'text-[var(--text-primary)]'}`}>
+                  {formatCurrency(item.value)}
+                </span>
               </div>
-              <div className="mt-2 text-center">
-                <div className="text-[9px] font-mono text-[var(--ink-ghost)] uppercase">
-                  {q.period || q.date?.slice(5, 7)}
-                </div>
-                <div className="text-[10px] font-mono text-[var(--ink-faded)] hidden group-hover:block">
-                  {formatCurrency(value)}
+              <div className="h-8 bg-[var(--bg-hover)] rounded-lg relative overflow-hidden">
+                <div
+                  className="absolute h-full rounded-lg transition-all duration-700 group-hover:brightness-125"
+                  style={{
+                    width: `${width}%`,
+                    background: color,
+                    boxShadow: `0 0 20px ${color}33`
+                  }}
+                />
+                {/* Percentage label inside bar */}
+                <div
+                  className="absolute h-full flex items-center px-3 text-[10px] font-mono font-medium transition-opacity"
+                  style={{ color: width > 25 ? 'var(--bg-void)' : 'var(--text-muted)' }}
+                >
+                  {maxValue > 0 ? `${((item.value / items[0].value) * 100).toFixed(0)}%` : '0%'}
                 </div>
               </div>
             </div>
@@ -889,62 +971,219 @@ function QuarterlyChart({ data, metric, title }: {
   );
 }
 
-function AnnualTrend({ data, metrics }: {
-  data: IncomeStatement[];
-  metrics: { key: keyof IncomeStatement; label: string; color?: string }[];
+// Interactive bar chart with tooltips
+function BarChart({
+  data,
+  title,
+  height = 140,
+  color = 'var(--accent)',
+  formatValue = formatCurrency
+}: {
+  data: { label: string; value: number; change?: number }[];
+  title: string;
+  height?: number;
+  color?: string;
+  formatValue?: (v: number) => string;
+}) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+
+  if (!data || data.length === 0) return null;
+
+  const values = data.map(d => d.value);
+  const maxValue = Math.max(...values.filter(v => v > 0), 1);
+  const minValue = Math.min(...values);
+
+  return (
+    <div className="mb-8 p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg">
+      <div className="flex items-center justify-between mb-4">
+        <span className="text-label">{title}</span>
+        {hoveredIndex !== null && (
+          <div className="flex items-center gap-3 text-xs font-mono animate-fade-in">
+            <span className="text-[var(--text-primary)]">{formatValue(values[hoveredIndex])}</span>
+            {hoveredIndex > 0 && values[hoveredIndex - 1] !== 0 && (
+              <span className={values[hoveredIndex] >= values[hoveredIndex - 1] ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}>
+                {formatPercent((values[hoveredIndex] - values[hoveredIndex - 1]) / Math.abs(values[hoveredIndex - 1]))}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="relative" style={{ height }}>
+        {/* Grid lines */}
+        <div className="absolute inset-0 flex flex-col justify-between pointer-events-none">
+          {[0, 1, 2, 3].map(i => (
+            <div key={i} className="border-t border-[var(--border-subtle)] border-dashed opacity-50" />
+          ))}
+        </div>
+
+        {/* Bars */}
+        <div className="absolute inset-0 flex items-end gap-2 px-1">
+          {data.map((d, i) => {
+            const value = d.value;
+            const barHeight = maxValue > 0 ? (Math.abs(value) / maxValue) * 100 : 0;
+            const isHovered = hoveredIndex === i;
+            const isNegative = value < 0;
+
+            return (
+              <div
+                key={d.label}
+                className="flex-1 flex flex-col items-center justify-end h-full cursor-pointer group"
+                onMouseEnter={() => setHoveredIndex(i)}
+                onMouseLeave={() => setHoveredIndex(null)}
+              >
+                <div
+                  className="w-full rounded-t transition-all duration-300"
+                  style={{
+                    height: `${barHeight}%`,
+                    minHeight: value !== 0 ? '4px' : '0',
+                    background: isHovered ? color : isNegative ? 'var(--negative)' : `${color}80`,
+                    transform: isHovered ? 'scaleX(1.1)' : 'scaleX(1)',
+                    boxShadow: isHovered ? `0 0 25px ${color}66` : 'none'
+                  }}
+                />
+                <div className={`mt-2 text-center transition-opacity ${isHovered ? 'opacity-100' : 'opacity-60'}`}>
+                  <div className="text-[9px] font-mono text-[var(--text-ghost)] uppercase truncate w-full">
+                    {d.label}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Y-axis labels */}
+      <div className="flex justify-between mt-2 text-[9px] font-mono text-[var(--text-ghost)]">
+        <span>0</span>
+        <span>{formatCompact(maxValue)}</span>
+      </div>
+    </div>
+  );
+}
+
+// Comparison chart for year-over-year
+function ComparisonChart({ data, metrics }: {
+  data: { label: string; [key: string]: string | number }[];
+  metrics: { key: string; label: string; color: string }[];
 }) {
   if (!data || data.length === 0) return null;
 
-  // Get last 5 years, reverse for chronological order
-  const years = [...data].slice(0, 5).reverse();
-
-  // Calculate max across all metrics
-  const allValues = metrics.flatMap(m => years.map(y => Number(y[m.key]) || 0));
-  const maxValue = Math.max(...allValues.filter(v => v > 0));
+  const allValues = metrics.flatMap(m => data.map(d => Number(d[m.key]) || 0));
+  const maxValue = Math.max(...allValues.filter(v => v > 0), 1);
 
   return (
-    <div className="mb-8">
-      <div className="text-label mb-4">ANNUAL PERFORMANCE</div>
+    <div className="mb-8 p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg">
+      <div className="text-label mb-4">YEAR OVER YEAR</div>
 
       {/* Legend */}
-      <div className="flex gap-4 mb-4">
-        {metrics.map(m => (
-          <div key={m.key as string} className="flex items-center gap-2">
-            <div className={`w-3 h-3 ${m.color || 'bg-[var(--ink)]'}`} />
-            <span className="text-xs font-mono text-[var(--ink-faded)]">{m.label}</span>
+      <div className="flex gap-6 mb-6">
+        {metrics.map((m) => (
+          <div key={m.key} className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded-full" style={{ background: m.color }} />
+            <span className="text-xs font-mono text-[var(--text-muted)]">{m.label}</span>
           </div>
         ))}
       </div>
 
-      <div className="space-y-4">
-        {years.map((year, yi) => (
-          <div key={year.date} className="space-y-2">
-            <div className="text-xs font-mono text-[var(--ink-ghost)]">
-              {year.date?.slice(0, 4)}
-            </div>
-            {metrics.map((m, mi) => {
-              const value = Number(year[m.key]) || 0;
-              const prevValue = yi > 0 ? (Number(years[yi-1][m.key]) || 0) : value;
-              const growth = prevValue > 0 ? (value - prevValue) / prevValue : 0;
+      <div className="space-y-6">
+        {data.map((row, yi) => {
+          return (
+            <div key={row.label} className="group">
+              <div className="flex items-center gap-4 mb-2">
+                <span className="w-12 text-sm font-mono font-medium text-[var(--text-primary)]">{row.label}</span>
+                <div className="flex-1 flex items-center gap-1">
+                  {metrics.map((m) => {
+                    const value = Number(row[m.key]) || 0;
+                    const width = maxValue > 0 ? (value / maxValue) * 100 : 0;
+                    const prevValue = yi > 0 ? Number(data[yi-1][m.key]) || 0 : value;
+                    const growth = prevValue > 0 ? (value - prevValue) / prevValue : 0;
 
-              return (
-                <div key={m.key as string} className="flex items-center gap-3">
-                  <div className="w-16 text-[10px] font-mono text-[var(--ink-faded)]">{m.label}</div>
-                  <div className="flex-1 h-4 bg-[var(--paper-dark)]">
-                    <div
-                      className={`h-full transition-all duration-700 ${m.color || 'bg-[var(--ink)]'}`}
-                      style={{ width: `${(value / maxValue) * 100}%` }}
-                    />
-                  </div>
-                  <div className="w-20 text-right text-xs font-mono">{formatCurrency(value)}</div>
-                  {yi > 0 && (
-                    <div className={`w-14 text-right text-[10px] font-mono ${growth >= 0 ? 'text-[#2d5a27]' : 'text-[var(--signal)]'}`}>
-                      {formatPercent(growth)}
-                    </div>
-                  )}
+                    return (
+                      <div key={m.key} className="flex-1 group/bar">
+                        <div className="h-8 bg-[var(--bg-hover)] rounded-lg overflow-hidden relative">
+                          <div
+                            className="h-full rounded-lg transition-all duration-700 flex items-center justify-end pr-2 group-hover/bar:brightness-125"
+                            style={{ width: `${width}%`, background: m.color }}
+                          >
+                            <span className="text-[10px] font-mono text-[var(--bg-void)] font-medium opacity-0 group-hover/bar:opacity-100 transition-opacity">
+                              {formatCurrency(value)}
+                            </span>
+                          </div>
+                        </div>
+                        {yi > 0 && (
+                          <div className={`text-[9px] font-mono mt-1 text-center ${growth >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}`}>
+                            {formatPercent(growth)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Donut chart for composition
+function DonutChart({ segments, size = 120, label }: {
+  segments: { label: string; value: number; color: string }[];
+  size?: number;
+  label?: string;
+}) {
+  const total = segments.reduce((sum, s) => sum + s.value, 0);
+  const strokeWidth = size * 0.15;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+
+  let currentOffset = 0;
+
+  return (
+    <div className="flex items-center gap-6">
+      <div className="relative" style={{ width: size, height: size }}>
+        <svg width={size} height={size} className="transform -rotate-90">
+          {segments.map((segment, i) => {
+            const percent = segment.value / total;
+            const strokeDasharray = `${percent * circumference} ${circumference}`;
+            const strokeDashoffset = -currentOffset * circumference;
+            currentOffset += percent;
+
+            return (
+              <circle
+                key={i}
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                fill="none"
+                stroke={segment.color}
+                strokeWidth={strokeWidth}
+                strokeDasharray={strokeDasharray}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                className="transition-all duration-700"
+              />
+            );
+          })}
+        </svg>
+        {label && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="text-xs font-mono text-[var(--text-muted)]">{label}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {segments.map((segment, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full" style={{ background: segment.color }} />
+            <span className="text-xs text-[var(--text-muted)]">{segment.label}</span>
+            <span className="text-xs font-mono text-[var(--text-primary)]">
+              {((segment.value / total) * 100).toFixed(0)}%
+            </span>
           </div>
         ))}
       </div>
@@ -962,22 +1201,22 @@ function NewsTimeline({ news }: { news: NewsItem[] }) {
         {news.slice(0, 10).map((item, i) => (
           <div
             key={i}
-            className="py-3 border-b border-[var(--paper-darker)] last:border-b-0 group hover:bg-[var(--paper-dark)] px-3 -mx-3 transition-colors"
+            className="py-3 border-b border-[var(--border-subtle)] last:border-b-0 group hover:bg-[var(--bg-elevated)] px-3 -mx-3 rounded transition-colors"
           >
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
-                <h4 className="text-sm font-medium text-[var(--ink)] leading-snug mb-1 group-hover:text-[var(--signal)] transition-colors">
+                <h4 className="text-sm font-medium text-[var(--text-primary)] leading-snug mb-1 group-hover:text-[var(--accent)] transition-colors">
                   {item.title}
                 </h4>
                 {item.summary && (
-                  <p className="text-xs text-[var(--ink-faded)] line-clamp-2">{item.summary}</p>
+                  <p className="text-xs text-[var(--text-muted)] line-clamp-2">{item.summary}</p>
                 )}
               </div>
               <div className="shrink-0 text-right">
-                <div className="text-[10px] font-mono text-[var(--ink-ghost)]">
+                <div className="text-[10px] font-mono text-[var(--text-ghost)]">
                   {new Date(item.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                 </div>
-                <div className="text-[9px] font-mono text-[var(--ink-ghost)] uppercase">{item.source}</div>
+                <div className="text-[9px] font-mono text-[var(--text-ghost)] uppercase">{item.source}</div>
               </div>
             </div>
           </div>
@@ -1013,8 +1252,8 @@ function FinancialsView({ ticker }: { ticker: string }) {
     return (
       <div className="flex items-center justify-center py-20">
         <div className="text-center">
-          <div className="w-8 h-8 border-2 border-[var(--ink)] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-sm text-[var(--ink-faded)] font-mono">Loading financials...</p>
+          <div className="w-8 h-8 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-sm text-[var(--text-muted)] font-mono">Loading financials...</p>
         </div>
       </div>
     );
@@ -1023,7 +1262,7 @@ function FinancialsView({ ticker }: { ticker: string }) {
   if (error) {
     return (
       <div className="text-center py-20">
-        <p className="text-[var(--signal)] text-sm">{error}</p>
+        <p className="text-[var(--negative)] text-sm">{error}</p>
       </div>
     );
   }
@@ -1036,7 +1275,6 @@ function FinancialsView({ ticker }: { ticker: string }) {
   const latestQ = quarterly[0];
   const latestA = annual[0];
 
-  // Calculate key metrics
   const latestRevenue = latestQ?.revenue || latestA?.revenue || 0;
   const latestGrossProfit = latestQ?.grossProfit || latestA?.grossProfit || 0;
   const latestNetIncome = latestQ?.netIncome || latestA?.netIncome || 0;
@@ -1046,21 +1284,21 @@ function FinancialsView({ ticker }: { ticker: string }) {
   return (
     <div>
       {/* Company Header */}
-      <div className="mb-8 pb-6 border-b border-[var(--paper-darker)]">
-        <div className="flex items-start justify-between gap-4">
+      <div className="mb-8 pb-6 border-b border-[var(--border-subtle)]">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h2 className="text-2xl font-display font-bold">{profile.companyName || ticker}</h2>
-            <div className="text-sm text-[var(--ink-faded)] mt-1">
+            <h2 className="text-2xl font-display font-bold text-[var(--text-primary)]">{profile.companyName || ticker}</h2>
+            <div className="text-sm text-[var(--text-muted)] mt-1">
               {profile.sector && <span>{profile.sector}</span>}
               {profile.industry && <span> · {profile.industry}</span>}
             </div>
           </div>
           <div className="text-right">
             {profile.price && (
-              <div className="text-2xl font-mono font-bold">${profile.price.toFixed(2)}</div>
+              <div className="text-2xl font-mono font-bold text-[var(--text-primary)]">${profile.price.toFixed(2)}</div>
             )}
             {profile.marketCap && (
-              <div className="text-xs text-[var(--ink-faded)] font-mono">
+              <div className="text-xs text-[var(--text-muted)] font-mono">
                 {formatCurrency(profile.marketCap)} market cap
               </div>
             )}
@@ -1069,16 +1307,12 @@ function FinancialsView({ ticker }: { ticker: string }) {
       </div>
 
       {/* Sub-navigation */}
-      <div className="flex gap-1 mb-8 border-b border-[var(--paper-darker)]">
+      <div className="tabs mb-8">
         {(['overview', 'quarterly', 'annual', 'news'] as const).map(view => (
           <button
             key={view}
             onClick={() => setActiveView(view)}
-            className={`px-4 py-2 text-xs font-mono uppercase tracking-wider border-b-2 transition-colors ${
-              activeView === view
-                ? 'border-[var(--ink)] text-[var(--ink)]'
-                : 'border-transparent text-[var(--ink-faded)] hover:text-[var(--ink)]'
-            }`}
+            className={`tab ${activeView === view ? 'active' : ''}`}
           >
             {view}
           </button>
@@ -1088,61 +1322,73 @@ function FinancialsView({ ticker }: { ticker: string }) {
       {/* Overview */}
       {activeView === 'overview' && (
         <div className="animate-fade-in">
-          {/* Key Metrics Grid */}
-          <div className="grid grid-cols-4 gap-4 mb-8">
-            <div className="p-4 border border-[var(--paper-darker)]">
-              <div className="text-label mb-1">REVENUE (TTM)</div>
-              <div className="text-xl font-mono font-bold">{formatCurrency(latestRevenue)}</div>
-            </div>
-            <div className="p-4 border border-[var(--paper-darker)]">
-              <div className="text-label mb-1">NET INCOME</div>
-              <div className="text-xl font-mono font-bold">{formatCurrency(latestNetIncome)}</div>
-            </div>
-            <div className="p-4 border border-[var(--paper-darker)]">
-              <div className="text-label mb-1">GROSS MARGIN</div>
-              <div className="text-xl font-mono font-bold">{(grossMargin * 100).toFixed(1)}%</div>
-            </div>
-            <div className="p-4 border border-[var(--paper-darker)]">
-              <div className="text-label mb-1">NET MARGIN</div>
-              <div className="text-xl font-mono font-bold">{(netMargin * 100).toFixed(1)}%</div>
-            </div>
+          {/* Key Metrics Grid with Sparklines */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <MetricCard
+              label="Revenue (TTM)"
+              value={latestRevenue}
+              prefix="$"
+              format="currency"
+              trend={quarterly.length > 1 && quarterly[1]?.revenue
+                ? (latestRevenue - quarterly[1].revenue) / quarterly[1].revenue
+                : undefined}
+              sparklineData={quarterly.slice(0, 8).map(q => q.revenue).reverse()}
+            />
+            <MetricCard
+              label="Net Income"
+              value={latestNetIncome}
+              prefix="$"
+              format="currency"
+              trend={quarterly.length > 1 && quarterly[1]?.netIncome
+                ? (latestNetIncome - quarterly[1].netIncome) / Math.abs(quarterly[1].netIncome)
+                : undefined}
+              sparklineData={quarterly.slice(0, 8).map(q => q.netIncome).reverse()}
+            />
+            <MetricCard
+              label="Gross Margin"
+              value={grossMargin * 100}
+              suffix="%"
+              decimals={1}
+            />
+            <MetricCard
+              label="Net Margin"
+              value={netMargin * 100}
+              suffix="%"
+              decimals={1}
+              trend={netMargin >= 0.1 ? 0.05 : netMargin >= 0 ? 0 : -0.05}
+            />
           </div>
 
-          {/* Quarterly Revenue Chart */}
+          {/* Quarterly Revenue Chart - Interactive */}
           {quarterly.length > 0 && (
-            <QuarterlyChart data={quarterly} metric="revenue" title="QUARTERLY REVENUE" />
+            <BarChart
+              data={quarterly.slice(0, 8).reverse().map(q => ({
+                label: q.date?.slice(0, 7) || '',
+                value: q.revenue,
+                change: undefined
+              }))}
+              title="QUARTERLY REVENUE"
+              height={220}
+              color="var(--accent)"
+              formatValue={(v) => formatCurrency(v)}
+            />
           )}
 
-          {/* Profitability Bars */}
+          {/* Profitability Waterfall - Visual breakdown */}
           {latestRevenue > 0 && (
-            <div className="mb-8">
-              <div className="text-label mb-4">PROFITABILITY WATERFALL</div>
-              <div className="space-y-3">
-                <MetricBar label="Revenue" value={latestRevenue} maxValue={latestRevenue} />
-                <MetricBar
-                  label="Gross Profit"
-                  value={latestGrossProfit}
-                  maxValue={latestRevenue}
-                  subtext={`${(grossMargin * 100).toFixed(0)}% margin`}
-                />
-                <MetricBar
-                  label="Op. Income"
-                  value={latestQ?.operatingIncome || latestA?.operatingIncome || 0}
-                  maxValue={latestRevenue}
-                />
-                <MetricBar
-                  label="Net Income"
-                  value={latestNetIncome}
-                  maxValue={latestRevenue}
-                  subtext={`${(netMargin * 100).toFixed(0)}% margin`}
-                />
-              </div>
-            </div>
+            <WaterfallChart
+              items={[
+                { label: 'Revenue', value: latestRevenue, color: 'var(--accent)' },
+                { label: 'Gross Profit', value: latestGrossProfit, color: 'var(--positive)' },
+                { label: 'Operating Income', value: latestQ?.operatingIncome || latestA?.operatingIncome || 0, color: 'var(--warning)' },
+                { label: 'Net Income', value: latestNetIncome, color: latestNetIncome >= 0 ? 'var(--positive)' : 'var(--negative)' },
+              ]}
+            />
           )}
 
           {/* Quick News */}
           {data.news && data.news.length > 0 && (
-            <div className="border-t border-[var(--paper-darker)] pt-6">
+            <div className="border-t border-[var(--border-subtle)] pt-6">
               <NewsTimeline news={data.news.slice(0, 3)} />
             </div>
           )}
@@ -1152,20 +1398,46 @@ function FinancialsView({ ticker }: { ticker: string }) {
       {/* Quarterly Detail */}
       {activeView === 'quarterly' && quarterly.length > 0 && (
         <div className="animate-fade-in">
-          <QuarterlyChart data={quarterly} metric="revenue" title="REVENUE BY QUARTER" />
-          <QuarterlyChart data={quarterly} metric="netIncome" title="NET INCOME BY QUARTER" />
+          {/* Revenue Chart with YoY changes */}
+          <BarChart
+            data={quarterly.slice(0, 8).reverse().map((q, i, arr) => {
+              const prevYearQ = arr[i - 4];
+              return {
+                label: q.date?.slice(0, 7) || '',
+                value: q.revenue,
+                change: prevYearQ ? (q.revenue - prevYearQ.revenue) / prevYearQ.revenue : undefined
+              };
+            })}
+            title="REVENUE BY QUARTER"
+            height={200}
+            color="var(--accent)"
+            formatValue={(v) => formatCurrency(v)}
+          />
+
+          {/* Net Income Chart */}
+          <BarChart
+            data={quarterly.slice(0, 8).reverse().map(q => ({
+              label: q.date?.slice(0, 7) || '',
+              value: q.netIncome,
+              change: undefined
+            }))}
+            title="NET INCOME BY QUARTER"
+            height={200}
+            color="var(--positive)"
+            formatValue={(v) => formatCurrency(v)}
+          />
 
           <div className="text-label mb-4">QUARTERLY BREAKDOWN</div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs font-mono">
               <thead>
-                <tr className="border-b-2 border-[var(--ink)]">
-                  <th className="text-left py-2 pr-4">Period</th>
-                  <th className="text-right py-2 px-2">Revenue</th>
-                  <th className="text-right py-2 px-2">Gross</th>
-                  <th className="text-right py-2 px-2">Op Inc</th>
-                  <th className="text-right py-2 px-2">Net Inc</th>
-                  <th className="text-right py-2 pl-2">EPS</th>
+                <tr className="border-b-2 border-[var(--border-default)]">
+                  <th className="text-left py-3 pr-4 text-[var(--text-muted)]">Period</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Revenue</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Gross</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Op Inc</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Net Inc</th>
+                  <th className="text-right py-3 pl-2 text-[var(--text-muted)]">EPS</th>
                 </tr>
               </thead>
               <tbody>
@@ -1174,24 +1446,24 @@ function FinancialsView({ ticker }: { ticker: string }) {
                   const revGrowth = prevQ?.revenue ? (q.revenue - prevQ.revenue) / prevQ.revenue : 0;
 
                   return (
-                    <tr key={q.date} className="border-b border-[var(--paper-darker)] hover:bg-[var(--paper-dark)]">
-                      <td className="py-2 pr-4 text-[var(--ink-faded)]">
+                    <tr key={q.date} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]">
+                      <td className="py-3 pr-4 text-[var(--text-muted)]">
                         {q.date?.slice(0, 7)}
                       </td>
-                      <td className="py-2 px-2 text-right">
+                      <td className="py-3 px-2 text-right text-[var(--text-primary)]">
                         {formatCurrency(q.revenue)}
                         {prevQ && (
-                          <span className={`ml-2 ${revGrowth >= 0 ? 'text-[#2d5a27]' : 'text-[var(--signal)]'}`}>
+                          <span className={`ml-2 ${revGrowth >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}`}>
                             {formatPercent(revGrowth)}
                           </span>
                         )}
                       </td>
-                      <td className="py-2 px-2 text-right">{formatCurrency(q.grossProfit)}</td>
-                      <td className="py-2 px-2 text-right">{formatCurrency(q.operatingIncome)}</td>
-                      <td className={`py-2 px-2 text-right ${q.netIncome < 0 ? 'text-[var(--signal)]' : ''}`}>
+                      <td className="py-3 px-2 text-right text-[var(--text-secondary)]">{formatCurrency(q.grossProfit)}</td>
+                      <td className="py-3 px-2 text-right text-[var(--text-secondary)]">{formatCurrency(q.operatingIncome)}</td>
+                      <td className={`py-3 px-2 text-right ${q.netIncome < 0 ? 'text-[var(--negative)]' : 'text-[var(--text-secondary)]'}`}>
                         {formatCurrency(q.netIncome)}
                       </td>
-                      <td className="py-2 pl-2 text-right">${q.epsDiluted?.toFixed(2) || '—'}</td>
+                      <td className="py-3 pl-2 text-right text-[var(--text-secondary)]">${q.epsDiluted?.toFixed(2) || '—'}</td>
                     </tr>
                   );
                 })}
@@ -1204,12 +1476,18 @@ function FinancialsView({ ticker }: { ticker: string }) {
       {/* Annual Detail */}
       {activeView === 'annual' && annual.length > 0 && (
         <div className="animate-fade-in">
-          <AnnualTrend
-            data={annual}
+          {/* Multi-year comparison chart */}
+          <ComparisonChart
+            data={annual.slice(0, 5).reverse().map(a => ({
+              label: a.date?.slice(0, 4) || '',
+              revenue: a.revenue,
+              grossProfit: a.grossProfit,
+              netIncome: a.netIncome,
+            }))}
             metrics={[
-              { key: 'revenue', label: 'Rev', color: 'bg-[var(--ink)]' },
-              { key: 'grossProfit', label: 'Gross', color: 'bg-[var(--ink-light)]' },
-              { key: 'netIncome', label: 'Net', color: 'bg-[var(--ink-faded)]' },
+              { key: 'revenue', label: 'Revenue', color: 'var(--accent)' },
+              { key: 'grossProfit', label: 'Gross Profit', color: 'var(--positive)' },
+              { key: 'netIncome', label: 'Net Income', color: 'var(--warning)' },
             ]}
           />
 
@@ -1217,13 +1495,13 @@ function FinancialsView({ ticker }: { ticker: string }) {
           <div className="overflow-x-auto">
             <table className="w-full text-xs font-mono">
               <thead>
-                <tr className="border-b-2 border-[var(--ink)]">
-                  <th className="text-left py-2 pr-4">Year</th>
-                  <th className="text-right py-2 px-2">Revenue</th>
-                  <th className="text-right py-2 px-2">YoY</th>
-                  <th className="text-right py-2 px-2">Gross Profit</th>
-                  <th className="text-right py-2 px-2">Net Income</th>
-                  <th className="text-right py-2 pl-2">EPS</th>
+                <tr className="border-b-2 border-[var(--border-default)]">
+                  <th className="text-left py-3 pr-4 text-[var(--text-muted)]">Year</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Revenue</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">YoY</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Gross Profit</th>
+                  <th className="text-right py-3 px-2 text-[var(--text-muted)]">Net Income</th>
+                  <th className="text-right py-3 pl-2 text-[var(--text-muted)]">EPS</th>
                 </tr>
               </thead>
               <tbody>
@@ -1232,17 +1510,17 @@ function FinancialsView({ ticker }: { ticker: string }) {
                   const revGrowth = prevA?.revenue ? (a.revenue - prevA.revenue) / prevA.revenue : 0;
 
                   return (
-                    <tr key={a.date} className="border-b border-[var(--paper-darker)] hover:bg-[var(--paper-dark)]">
-                      <td className="py-2 pr-4 font-medium">{a.date?.slice(0, 4)}</td>
-                      <td className="py-2 px-2 text-right">{formatCurrency(a.revenue)}</td>
-                      <td className={`py-2 px-2 text-right ${revGrowth >= 0 ? 'text-[#2d5a27]' : 'text-[var(--signal)]'}`}>
+                    <tr key={a.date} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]">
+                      <td className="py-3 pr-4 font-medium text-[var(--text-primary)]">{a.date?.slice(0, 4)}</td>
+                      <td className="py-3 px-2 text-right text-[var(--text-primary)]">{formatCurrency(a.revenue)}</td>
+                      <td className={`py-3 px-2 text-right ${revGrowth >= 0 ? 'text-[var(--positive)]' : 'text-[var(--negative)]'}`}>
                         {prevA ? formatPercent(revGrowth) : '—'}
                       </td>
-                      <td className="py-2 px-2 text-right">{formatCurrency(a.grossProfit)}</td>
-                      <td className={`py-2 px-2 text-right ${a.netIncome < 0 ? 'text-[var(--signal)]' : ''}`}>
+                      <td className="py-3 px-2 text-right text-[var(--text-secondary)]">{formatCurrency(a.grossProfit)}</td>
+                      <td className={`py-3 px-2 text-right ${a.netIncome < 0 ? 'text-[var(--negative)]' : 'text-[var(--text-secondary)]'}`}>
                         {formatCurrency(a.netIncome)}
                       </td>
-                      <td className="py-2 pl-2 text-right">${a.epsDiluted?.toFixed(2) || '—'}</td>
+                      <td className="py-3 pl-2 text-right text-[var(--text-secondary)]">${a.epsDiluted?.toFixed(2) || '—'}</td>
                     </tr>
                   );
                 })}
@@ -1258,7 +1536,7 @@ function FinancialsView({ ticker }: { ticker: string }) {
           {data.news && data.news.length > 0 ? (
             <NewsTimeline news={data.news} />
           ) : (
-            <p className="text-[var(--ink-ghost)] text-center py-10">No recent news available</p>
+            <p className="text-[var(--text-ghost)] text-center py-10">No recent news available</p>
           )}
         </div>
       )}
@@ -1267,6 +1545,28 @@ function FinancialsView({ ticker }: { ticker: string }) {
 }
 
 // ===================== MAIN COMPONENT =====================
+
+// Theme toggle component
+function ThemeToggle({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
+  return (
+    <button
+      onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+      className="p-2 rounded-lg border border-[var(--border-subtle)] hover:border-[var(--border-default)] hover:bg-[var(--bg-hover)] transition-all"
+      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+    >
+      {theme === 'dark' ? (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-[var(--text-muted)]">
+          <circle cx="12" cy="12" r="5"/>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-[var(--text-muted)]">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      )}
+    </button>
+  );
+}
 
 export default function Home() {
   const [view, setView] = useState<View>('home');
@@ -1282,6 +1582,19 @@ export default function Home() {
   const [runningTicker, setRunningTicker] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [reportTab, setReportTab] = useState<ReportTab>('report');
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  // Apply theme to document
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  // Load saved theme
+  useEffect(() => {
+    const saved = localStorage.getItem('theme') as 'dark' | 'light' | null;
+    if (saved) setTheme(saved);
+  }, []);
 
   const streamCleanupRef = useRef<(() => void) | null>(null);
 
@@ -1425,35 +1738,39 @@ export default function Home() {
   // ==================== HOME ====================
   if (view === 'home') {
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--paper)]">
-        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--paper-darker)]">
-          <span className="font-mono text-sm uppercase tracking-wider text-[var(--ink-faded)]">K+ Research</span>
+      <div className="min-h-screen flex flex-col bg-[var(--bg-void)]">
+        {/* Header */}
+        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]">
+          <span className="font-mono text-sm uppercase tracking-wider text-[var(--text-muted)]">K+ Research</span>
           <nav className="flex items-center gap-4">
             {activeRuns.length > 0 && (
               <button
                 onClick={() => goToRun(activeRuns[0])}
-                className="flex items-center gap-2 px-3 py-1.5 bg-[var(--signal-light)] border border-[var(--signal)] text-[var(--signal)] text-xs font-mono uppercase"
+                className="flex items-center gap-2 px-3 py-1.5 bg-[var(--accent-muted)] border border-[var(--accent)] text-[var(--accent)] text-xs font-mono uppercase rounded"
               >
-                <span className="w-2 h-2 bg-[var(--signal)] rounded-full animate-pulse" />
+                <span className="status-dot processing" />
                 {activeRuns.length} Active
               </button>
             )}
             <button
               onClick={() => { loadRuns(); setView('archive'); }}
-              className="text-sm font-mono uppercase tracking-wider text-[var(--ink-faded)] hover:text-[var(--ink)]"
+              className="nav-link"
             >
               Archive ({allRuns.length})
             </button>
           </nav>
         </header>
 
+        {/* Main - Centered hero */}
         <main className="flex-1 flex flex-col items-center justify-center px-8">
-          <h1 className="text-massive">
-            K<span className="text-signal">+</span>
+          {/* K+ Brand */}
+          <h1 className="text-massive animate-fade-up">
+            K<span className="text-[var(--accent)]">+</span>
           </h1>
 
-          <div className="mt-12">
-            <div className="flex items-center gap-4">
+          {/* Ticker Input */}
+          <div className="mt-16 animate-fade-up delay-2">
+            <div className="flex items-center gap-6">
               <input
                 type="text"
                 value={ticker}
@@ -1467,15 +1784,20 @@ export default function Home() {
               <button
                 onClick={startAnalysis}
                 disabled={!ticker.trim()}
-                className="btn"
+                className="btn btn-primary"
               >
                 Analyze
               </button>
             </div>
             {error && (
-              <p className="mt-4 text-sm text-[var(--signal)]">{error}</p>
+              <p className="mt-4 text-sm text-[var(--negative)] text-center">{error}</p>
             )}
           </div>
+
+          {/* Subtle tagline */}
+          <p className="mt-8 text-xs text-[var(--text-ghost)] font-mono tracking-wider animate-fade-up delay-4">
+            EQUITY INTELLIGENCE
+          </p>
         </main>
       </div>
     );
@@ -1484,54 +1806,58 @@ export default function Home() {
   // ==================== ARCHIVE ====================
   if (view === 'archive') {
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--paper)]">
-        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--paper-darker)]">
+      <div className="min-h-screen flex flex-col bg-[var(--bg-void)]">
+        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]">
           <button
             onClick={() => setView('home')}
-            className="font-mono text-sm uppercase tracking-wider text-[var(--ink-faded)] hover:text-[var(--ink)]"
+            className="nav-link"
           >
-            &larr; Home
+            ← Home
           </button>
-          <span className="font-mono text-sm text-[var(--ink-faded)]">
+          <span className="font-mono text-sm text-[var(--text-muted)]">
             {activeRuns.length} active · {completedRuns.length} completed
           </span>
         </header>
 
         <main className="flex-1 px-6 py-6 overflow-auto">
           {allRuns.length === 0 ? (
-            <p className="text-center text-[var(--ink-ghost)] py-20">No runs yet.</p>
+            <p className="text-center text-[var(--text-ghost)] py-20">No runs yet.</p>
           ) : (
-            <div className="max-w-2xl mx-auto space-y-1">
+            <div className="max-w-3xl mx-auto space-y-2">
               {allRuns.map((run) => (
                 <div
                   key={run.id}
-                  className="flex items-center gap-4 hover:bg-[var(--paper-dark)] transition-colors border-b border-[var(--paper-darker)]"
+                  className="card card-interactive flex items-center gap-4"
                 >
                   <button
                     onClick={() => goToRun(run)}
-                    className="flex-1 text-left px-4 py-3 flex items-center gap-4"
+                    className="flex-1 text-left flex items-center gap-4"
                   >
-                    <span className="font-mono font-medium w-16">{run.ticker}</span>
-                    <span className="text-xs text-[var(--ink-ghost)] w-24">
+                    <span className="font-mono font-semibold text-[var(--text-primary)] w-16">{run.ticker}</span>
+                    <span className="text-xs text-[var(--text-ghost)] w-24">
                       {new Date(run.createdAt).toLocaleDateString()}
                     </span>
                     {run.isActive ? (
-                      <span className="ml-auto flex items-center gap-2 text-xs font-mono text-[var(--signal)]">
-                        <span className="w-2 h-2 bg-[var(--signal)] rounded-full animate-pulse" />
+                      <span className="ml-auto flex items-center gap-2 text-xs font-mono text-[var(--accent)]">
+                        <span className="status-dot processing" />
                         Stage {run.currentStage || '?'}/5
                       </span>
                     ) : run.verdict ? (
-                      <span className="ml-auto text-xs font-mono font-medium">
+                      <span className={`ml-auto text-xs font-mono font-semibold ${
+                        run.verdict.investmentView.toUpperCase() === 'BUY' ? 'text-[var(--positive)]' :
+                        run.verdict.investmentView.toUpperCase() === 'SELL' ? 'text-[var(--negative)]' :
+                        'text-[var(--warning)]'
+                      }`}>
                         {run.verdict.investmentView}
                       </span>
                     ) : (
-                      <span className="ml-auto text-xs text-[var(--ink-ghost)]">—</span>
+                      <span className="ml-auto text-xs text-[var(--text-ghost)]">—</span>
                     )}
                   </button>
                   {!run.isActive && (
                     <button
                       onClick={(e) => deleteRun(run.id, e)}
-                      className="px-3 py-3 text-xs text-[var(--ink-ghost)] hover:text-[var(--signal)]"
+                      className="px-2 py-2 text-sm text-[var(--text-ghost)] hover:text-[var(--negative)] transition-colors"
                     >
                       ×
                     </button>
@@ -1550,52 +1876,57 @@ export default function Home() {
     const progress = (currentStage / 5) * 100;
 
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--paper)]">
-        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--paper-darker)]">
+      <div className="min-h-screen flex flex-col bg-[var(--bg-void)]">
+        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setView('home')}
-              className="font-mono text-sm uppercase tracking-wider text-[var(--ink-faded)] hover:text-[var(--ink)]"
+              className="nav-link"
             >
-              &larr; Home
+              ← Home
             </button>
-            <span className="text-[var(--ink-ghost)]">·</span>
-            <span className="font-mono font-bold">{runningTicker}</span>
+            <span className="text-[var(--text-ghost)]">·</span>
+            <span className="font-mono font-bold text-[var(--text-primary)]">{runningTicker}</span>
           </div>
           <div className="flex items-center gap-4">
             {isRunning ? (
               <>
-                <span className="flex items-center gap-2 text-xs font-mono text-[var(--signal)]">
-                  <span className="w-2 h-2 bg-[var(--signal)] rounded-full animate-pulse" />
+                <span className="flex items-center gap-2 text-xs font-mono text-[var(--accent)]">
+                  <span className="status-dot processing" />
                   Processing
                 </span>
                 {runningRunId && (
                   <button
                     onClick={() => cancelRun(runningRunId)}
-                    className="text-xs font-mono uppercase text-[var(--ink-faded)] hover:text-[var(--signal)]"
+                    className="text-xs font-mono uppercase text-[var(--text-muted)] hover:text-[var(--negative)] transition-colors"
                   >
                     Cancel
                   </button>
                 )}
               </>
             ) : (
-              <span className="text-xs font-mono text-[var(--ink-faded)]">Complete</span>
+              <span className="flex items-center gap-2 text-xs font-mono text-[var(--positive)]">
+                <span className="status-dot active" />
+                Complete
+              </span>
             )}
           </div>
         </header>
 
-        <main className="flex-1 px-6 py-6 overflow-auto">
-          <div className="max-w-4xl mx-auto grid grid-cols-2 gap-8">
+        <main className="flex-1 px-6 py-8 overflow-auto">
+          <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* Left: Progress */}
             <div>
-              <h1 className="text-xl font-display font-bold mb-4">
+              <h1 className="text-2xl font-display font-bold text-[var(--text-primary)] mb-6">
                 {isRunning ? 'Processing...' : 'Analysis Complete'}
               </h1>
-              <div className="h-1 bg-[var(--paper-darker)] mb-6">
-                <div
-                  className="h-full bg-[var(--signal)] transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
+
+              {/* Progress bar */}
+              <div className="progress-line mb-8">
+                <div className="progress-fill" style={{ width: `${progress}%` }} />
               </div>
+
+              {/* Stages */}
               <div className="space-y-1">
                 {stages.map((stage, i) => {
                   const isComplete = i < currentStage;
@@ -1604,24 +1935,22 @@ export default function Home() {
                   return (
                     <div
                       key={stage.num}
-                      className={`flex items-center gap-3 py-2 text-sm ${
-                        isCurrent ? 'text-[var(--signal)]' :
-                        isComplete ? 'text-[var(--ink)]' :
-                        'text-[var(--ink-ghost)]'
-                      }`}
+                      className={`stage ${isCurrent ? 'active' : ''} ${isComplete ? 'complete' : ''}`}
                     >
-                      <span className="font-mono w-6">{String(stage.num).padStart(2, '0')}</span>
-                      <span className="uppercase tracking-wider text-xs">{stage.name}</span>
-                      <span className="ml-auto">
-                        {isComplete && '✓'}
-                        {isCurrent && <span className="animate-pulse">•</span>}
+                      <span className="stage-num">{String(stage.num).padStart(2, '0')}</span>
+                      <span className="stage-name">{stage.name}</span>
+                      <span className="ml-auto text-sm">
+                        {isComplete && <span className="text-[var(--positive)]">✓</span>}
+                        {isCurrent && <span className="animate-pulse text-[var(--accent)]">●</span>}
                       </span>
                     </div>
                   );
                 })}
               </div>
+
+              {/* Actions */}
               {!isRunning && (
-                <div className="mt-6 flex gap-3">
+                <div className="mt-8 flex gap-3">
                   {runningRunId && (
                     <button
                       onClick={() => goToRun({
@@ -1631,7 +1960,7 @@ export default function Home() {
                         createdAt: new Date().toISOString(),
                         isActive: false
                       })}
-                      className="btn btn-signal"
+                      className="btn btn-primary"
                     >
                       View Report
                     </button>
@@ -1642,21 +1971,27 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <div className="bg-[var(--paper-dark)] p-4 h-[400px] overflow-auto">
-              <div className="text-xs font-mono text-[var(--ink-ghost)] mb-3">
+
+            {/* Right: Event Log */}
+            <div className="event-log">
+              <div className="text-xs font-mono text-[var(--text-ghost)] mb-3">
                 {events.length} events
               </div>
               {events.length === 0 ? (
-                <p className="text-[var(--ink-ghost)] text-sm">Waiting for events...</p>
+                <p className="text-[var(--text-ghost)] text-sm">Waiting for events...</p>
               ) : (
-                <div className="space-y-1 text-xs font-mono">
+                <div className="space-y-1">
                   {events.slice(-50).map((event, i) => (
-                    <div key={i} className="text-[var(--ink-light)]">
-                      {event.type === 'stage_start' && <span className="text-[var(--ink)]">→ {event.data?.stage_name}</span>}
-                      {event.type === 'stage_complete' && <span className="text-[var(--signal)]">✓ {event.data?.stage_name}</span>}
+                    <div key={i} className={`event-log-item ${
+                      event.type === 'stage_start' ? 'stage-start' :
+                      event.type === 'stage_complete' ? 'stage-complete' :
+                      event.type === 'error' ? 'error' : ''
+                    }`}>
+                      {event.type === 'stage_start' && <span>→ {event.data?.stage_name}</span>}
+                      {event.type === 'stage_complete' && <span>✓ {event.data?.stage_name}</span>}
                       {event.type === 'agent_event' && <span>{event.data?.message || '...'}</span>}
-                      {event.type === 'complete' && <span className="text-[var(--ink)] font-bold">• Complete</span>}
-                      {event.type === 'error' && <span className="text-[var(--signal)]">× {event.data?.detail}</span>}
+                      {event.type === 'complete' && <span className="font-bold">● Complete</span>}
+                      {event.type === 'error' && <span>× {event.data?.detail}</span>}
                     </div>
                   ))}
                 </div>
@@ -1677,35 +2012,36 @@ export default function Home() {
     const verticals = fullRunData?.verticals;
 
     return (
-      <div className="min-h-screen bg-[var(--paper)]">
+      <div className="min-h-screen bg-[var(--bg-void)]">
         {/* Header */}
-        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--paper-darker)] sticky top-0 bg-paper-glass z-50">
+        <header className="px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-4">
             <button
               onClick={() => setView('home')}
-              className="font-mono text-sm uppercase tracking-wider text-[var(--ink-faded)] hover:text-[var(--ink)]"
+              className="nav-link"
             >
-              &larr;
+              ←
             </button>
-            <span className="font-mono font-bold text-xl">{selectedRun.ticker}</span>
+            <span className="font-mono font-bold text-xl text-[var(--text-primary)]">{selectedRun.ticker}</span>
             {sr?.conviction && (
-              <span className={`px-2 py-1 text-xs font-mono uppercase ${
+              <span className={`px-2 py-1 text-xs font-mono uppercase rounded ${
                 sr.conviction.toLowerCase().includes('high')
-                  ? 'bg-[var(--ink)] text-[var(--paper)]'
-                  : 'border border-[var(--paper-darker)]'
+                  ? 'bg-[var(--text-primary)] text-[var(--bg-void)]'
+                  : 'border border-[var(--border-default)] text-[var(--text-secondary)]'
               }`}>
                 {sr.conviction}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-4 text-xs text-[var(--ink-ghost)]">
+          <div className="flex items-center gap-4 text-xs text-[var(--text-ghost)]">
             <span>{new Date(selectedRun.createdAt).toLocaleDateString()}</span>
             {costs && <span className="font-mono">${costs.total_cost_usd.toFixed(2)}</span>}
+            <ThemeToggle theme={theme} setTheme={setTheme} />
           </div>
         </header>
 
         {/* Tabs */}
-        <div className="px-6 border-b border-[var(--paper-darker)] flex gap-1 sticky top-[57px] bg-[var(--paper)] z-40">
+        <div className="px-6 border-b border-[var(--border-subtle)] tabs">
           <TabButton active={reportTab === 'report'} onClick={() => setReportTab('report')}>
             Report
           </TabButton>
@@ -1736,7 +2072,7 @@ export default function Home() {
 
         {/* Content */}
         <main className="px-6 py-8">
-          <div className={reportTab === 'report' ? 'max-w-6xl mx-auto' : 'max-w-4xl mx-auto'}>
+          <div className={reportTab === 'report' ? 'max-w-[85rem] mx-auto' : 'max-w-5xl mx-auto'}>
 
             {/* REPORT TAB */}
             {reportTab === 'report' && (
@@ -1749,45 +2085,46 @@ export default function Home() {
                   />
                 )}
 
-                {/* Scenarios Chart */}
+                {/* Scenarios Chart - Horizontal Bar */}
                 {sr?.scenarios && (
-                  <div className="mb-8 p-6 border border-[var(--paper-darker)]">
+                  <div className="mb-10 p-6 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
                     <div className="text-label mb-4">SCENARIO ANALYSIS</div>
-                    <div className="flex gap-4 mb-6">
-                      {/* Visual probability bar */}
-                      <div className="flex-1 h-8 flex overflow-hidden border border-[var(--paper-darker)]">
-                        <div
-                          className="bg-[#2d5a27] flex items-center justify-center text-xs text-white font-mono"
-                          style={{ width: `${sr.scenarios.bull.probability * 100}%` }}
-                        >
-                          {Math.round(sr.scenarios.bull.probability * 100)}%
-                        </div>
-                        <div
-                          className="bg-[var(--ink-faded)] flex items-center justify-center text-xs text-white font-mono"
-                          style={{ width: `${sr.scenarios.base.probability * 100}%` }}
-                        >
-                          {Math.round(sr.scenarios.base.probability * 100)}%
-                        </div>
-                        <div
-                          className="bg-[var(--signal)] flex items-center justify-center text-xs text-white font-mono"
-                          style={{ width: `${sr.scenarios.bear.probability * 100}%` }}
-                        >
-                          {Math.round(sr.scenarios.bear.probability * 100)}%
-                        </div>
+
+                    {/* Probability bar */}
+                    <div className="flex mb-6 h-10 rounded-lg overflow-hidden">
+                      <div
+                        className="bg-[var(--positive)] flex items-center justify-center text-xs text-white font-mono font-medium"
+                        style={{ width: `${sr.scenarios.bull.probability * 100}%` }}
+                      >
+                        {Math.round(sr.scenarios.bull.probability * 100)}%
+                      </div>
+                      <div
+                        className="bg-[var(--text-muted)] flex items-center justify-center text-xs text-white font-mono font-medium"
+                        style={{ width: `${sr.scenarios.base.probability * 100}%` }}
+                      >
+                        {Math.round(sr.scenarios.base.probability * 100)}%
+                      </div>
+                      <div
+                        className="bg-[var(--negative)] flex items-center justify-center text-xs text-white font-mono font-medium"
+                        style={{ width: `${sr.scenarios.bear.probability * 100}%` }}
+                      >
+                        {Math.round(sr.scenarios.bear.probability * 100)}%
                       </div>
                     </div>
+
+                    {/* Scenario cards */}
                     <div className="grid grid-cols-3 gap-4">
-                      <div className="p-4 bg-[#2d5a27]/10 border-l-4 border-[#2d5a27]">
-                        <div className="text-xs font-mono text-[#2d5a27] mb-1">BULL</div>
-                        <p className="text-sm text-[var(--ink-light)]">{sr.scenarios.bull.headline}</p>
+                      <div className="scenario-card bull">
+                        <div className="text-xs font-mono text-[var(--positive)] mb-2">BULL</div>
+                        <p className="text-sm text-[var(--text-primary)]">{sr.scenarios.bull.headline}</p>
                       </div>
-                      <div className="p-4 bg-[var(--paper-dark)] border-l-4 border-[var(--ink-faded)]">
-                        <div className="text-xs font-mono text-[var(--ink-faded)] mb-1">BASE</div>
-                        <p className="text-sm text-[var(--ink-light)]">{sr.scenarios.base.headline}</p>
+                      <div className="scenario-card base">
+                        <div className="text-xs font-mono text-[var(--text-muted)] mb-2">BASE</div>
+                        <p className="text-sm text-[var(--text-primary)]">{sr.scenarios.base.headline}</p>
                       </div>
-                      <div className="p-4 bg-[var(--signal)]/10 border-l-4 border-[var(--signal)]">
-                        <div className="text-xs font-mono text-[var(--signal)] mb-1">BEAR</div>
-                        <p className="text-sm text-[var(--ink-light)]">{sr.scenarios.bear.headline}</p>
+                      <div className="scenario-card bear">
+                        <div className="text-xs font-mono text-[var(--negative)] mb-2">BEAR</div>
+                        <p className="text-sm text-[var(--text-primary)]">{sr.scenarios.bear.headline}</p>
                       </div>
                     </div>
                   </div>
@@ -1795,28 +2132,28 @@ export default function Home() {
 
                 {/* Key Risks & Debates */}
                 {(sr?.top_risks || sr?.key_debates) && (
-                  <div className="mb-8 grid grid-cols-2 gap-4">
+                  <div className="mb-10 grid grid-cols-1 md:grid-cols-2 gap-4">
                     {sr?.top_risks && sr.top_risks.length > 0 && (
-                      <div className="p-4 border border-[var(--paper-darker)]">
+                      <div className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
                         <div className="text-label mb-3">TOP RISKS</div>
                         <div className="space-y-2">
                           {sr.top_risks.slice(0, 4).map((risk, i) => (
                             <div key={i} className="flex gap-2 text-sm">
-                              <span className="text-[var(--signal)] shrink-0">!</span>
-                              <span className="text-[var(--ink-light)]">{risk}</span>
+                              <span className="text-[var(--negative)] shrink-0">!</span>
+                              <span className="text-[var(--text-secondary)]">{risk}</span>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
                     {sr?.key_debates && sr.key_debates.length > 0 && (
-                      <div className="p-4 border border-[var(--paper-darker)]">
+                      <div className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
                         <div className="text-label mb-3">KEY DEBATES</div>
                         <div className="space-y-2">
                           {sr.key_debates.slice(0, 4).map((debate, i) => (
                             <div key={i} className="flex gap-2 text-sm">
-                              <span className="text-[var(--ink-ghost)] shrink-0">?</span>
-                              <span className="text-[var(--ink-light)]">{debate}</span>
+                              <span className="text-[var(--warning)] shrink-0">?</span>
+                              <span className="text-[var(--text-secondary)]">{debate}</span>
                             </div>
                           ))}
                         </div>
@@ -1831,7 +2168,7 @@ export default function Home() {
                     thesis={sr?.thesis_summary}
                   />
                 ) : (
-                  <p className="text-[var(--ink-ghost)]">Loading report...</p>
+                  <p className="text-[var(--text-ghost)]">Loading report...</p>
                 )}
               </div>
             )}
@@ -1842,7 +2179,7 @@ export default function Home() {
                 {discovery ? (
                   <DiscoveryView discovery={discovery} />
                 ) : (
-                  <p className="text-[var(--ink-ghost)]">No discovery data available</p>
+                  <p className="text-[var(--text-ghost)]">No discovery data available</p>
                 )}
               </div>
             )}
@@ -1853,7 +2190,7 @@ export default function Home() {
                 {verticals && verticals.length > 0 ? (
                   <VerticalsView verticals={verticals} />
                 ) : (
-                  <p className="text-[var(--ink-ghost)]">No vertical analysis available</p>
+                  <p className="text-[var(--text-ghost)]">No vertical analysis available</p>
                 )}
               </div>
             )}
@@ -1862,20 +2199,20 @@ export default function Home() {
             {reportTab === 'synthesis' && (
               <div className="animate-fade-in">
                 <div className="mb-6">
-                  <h2 className="text-title mb-2">Model Synthesis</h2>
-                  <p className="text-sm text-[var(--ink-faded)]">
+                  <h2 className="text-title text-[var(--text-primary)] mb-2">Model Synthesis</h2>
+                  <p className="text-sm text-[var(--text-muted)]">
                     Compare the competing analysis from Claude and GPT
                   </p>
                 </div>
 
                 {ef && (
-                  <div className="mb-6 p-4 border border-[var(--paper-darker)]">
+                  <div className="mb-6 p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
                     <div className="text-label mb-2">JUDGE DECISION</div>
-                    <p className="text-sm text-[var(--ink-light)] mb-3">{ef.preference_reasoning}</p>
+                    <p className="text-sm text-[var(--text-secondary)] mb-3">{ef.preference_reasoning}</p>
                     <div className="flex gap-4 text-xs font-mono">
-                      <span>Claude: {Math.round((ef.claude_score || 0) * 100)}</span>
-                      <span>GPT: {Math.round((ef.gpt_score || 0) * 100)}</span>
-                      <span className="text-[var(--signal)]">Winner: {ef.preferred_synthesis}</span>
+                      <span className="text-[var(--text-muted)]">Claude: {Math.round((ef.claude_score || 0) * 100)}</span>
+                      <span className="text-[var(--text-muted)]">GPT: {Math.round((ef.gpt_score || 0) * 100)}</span>
+                      <span className="text-[var(--accent)]">Winner: {ef.preferred_synthesis}</span>
                     </div>
                   </div>
                 )}
@@ -1887,7 +2224,7 @@ export default function Home() {
                 />
 
                 {!fullRunData?.claude_synthesis && !fullRunData?.gpt_synthesis && (
-                  <p className="text-[var(--ink-ghost)]">No synthesis data available</p>
+                  <p className="text-[var(--text-ghost)]">No synthesis data available</p>
                 )}
               </div>
             )}
@@ -1902,87 +2239,139 @@ export default function Home() {
             {/* COSTS TAB */}
             {reportTab === 'costs' && costs && (
               <div className="animate-fade-in">
-                <div className="mb-6">
-                  <h2 className="text-title mb-2">Cost Breakdown</h2>
-                  <p className="text-sm text-[var(--ink-faded)]">
-                    Token usage and API costs for this analysis
+                <div className="mb-8">
+                  <h2 className="text-title text-[var(--text-primary)] mb-2">Cost Analysis</h2>
+                  <p className="text-sm text-[var(--text-muted)]">
+                    Token usage and API costs for this analysis run
                   </p>
                 </div>
 
-                <div className="grid grid-cols-4 gap-4 mb-8">
-                  <div className="p-4 border border-[var(--paper-darker)]">
-                    <div className="text-label mb-1">TOTAL</div>
-                    <div className="text-2xl font-mono">${costs.total_cost_usd.toFixed(2)}</div>
-                  </div>
-                  <div className="p-4 border border-[var(--paper-darker)]">
-                    <div className="text-label mb-1">BUDGET</div>
-                    <div className="text-2xl font-mono">${costs.budget_limit}</div>
-                  </div>
-                  <div className="p-4 border border-[var(--paper-darker)]">
-                    <div className="text-label mb-1">INPUT</div>
-                    <div className="text-2xl font-mono">{Math.round(costs.total_input_tokens / 1000)}k</div>
-                  </div>
-                  <div className="p-4 border border-[var(--paper-darker)]">
-                    <div className="text-label mb-1">OUTPUT</div>
-                    <div className="text-2xl font-mono">{Math.round(costs.total_output_tokens / 1000)}k</div>
-                  </div>
+                {/* Key Metrics with AnimatedNumber */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+                  <MetricCard
+                    label="Total Cost"
+                    value={costs.total_cost_usd}
+                    prefix="$"
+                    decimals={2}
+                    trend={costs.budget_limit > 0 ? -(1 - costs.total_cost_usd / costs.budget_limit) : undefined}
+                  />
+                  <MetricCard
+                    label="Budget Used"
+                    value={costs.budget_limit > 0 ? (costs.total_cost_usd / costs.budget_limit) * 100 : 0}
+                    suffix="%"
+                    decimals={0}
+                  />
+                  <MetricCard
+                    label="Input Tokens"
+                    value={costs.total_input_tokens}
+                    format="compact"
+                  />
+                  <MetricCard
+                    label="Output Tokens"
+                    value={costs.total_output_tokens}
+                    format="compact"
+                  />
                 </div>
 
-                <Collapsible title="By Provider" defaultOpen>
-                  <div className="space-y-2">
-                    {Object.entries(costs.by_provider || {}).sort((a, b) => b[1] - a[1]).map(([provider, cost]) => (
-                      <CostBar key={provider} label={provider} value={cost} total={costs.total_cost_usd} />
-                    ))}
-                  </div>
-                </Collapsible>
+                {/* Cost Distribution Visual */}
+                <div className="grid md:grid-cols-2 gap-8 mb-10">
+                  {/* Provider Donut */}
+                  {costs.by_provider && Object.keys(costs.by_provider).length > 0 && (
+                    <div className="p-6 bg-[var(--bg-surface)] rounded-lg border border-[var(--border-subtle)]">
+                      <div className="text-label mb-6">COST BY PROVIDER</div>
+                      <DonutChart
+                        segments={Object.entries(costs.by_provider)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([label, value], i) => ({
+                            label,
+                            value,
+                            color: ['var(--accent)', 'var(--positive)', 'var(--warning)', 'var(--text-muted)'][i % 4]
+                          }))}
+                        size={140}
+                        label={`$${costs.total_cost_usd.toFixed(2)}`}
+                      />
+                    </div>
+                  )}
 
-                <Collapsible title="By Agent">
-                  <div className="space-y-2">
-                    {Object.entries(costs.by_agent || {}).sort((a, b) => b[1] - a[1]).map(([agent, cost]) => (
-                      <CostBar key={agent} label={agent} value={cost} total={costs.total_cost_usd} />
-                    ))}
-                  </div>
-                </Collapsible>
+                  {/* Agent Breakdown */}
+                  {costs.by_agent && Object.keys(costs.by_agent).length > 0 && (
+                    <div className="p-6 bg-[var(--bg-surface)] rounded-lg border border-[var(--border-subtle)]">
+                      <div className="text-label mb-6">COST BY AGENT</div>
+                      <div className="space-y-4">
+                        {Object.entries(costs.by_agent)
+                          .sort((a, b) => b[1] - a[1])
+                          .slice(0, 6)
+                          .map(([agent, cost], i) => {
+                            const pct = (cost / costs.total_cost_usd) * 100;
+                            return (
+                              <div key={agent} className="group">
+                                <div className="flex justify-between items-center mb-1">
+                                  <span className="text-xs font-mono text-[var(--text-secondary)] truncate max-w-[60%]">{agent}</span>
+                                  <span className="text-xs font-mono text-[var(--text-primary)]">${cost.toFixed(2)}</span>
+                                </div>
+                                <div className="h-2 bg-[var(--bg-hover)] rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full transition-all duration-500 group-hover:brightness-125"
+                                    style={{
+                                      width: `${pct}%`,
+                                      backgroundColor: ['var(--accent)', 'var(--positive)', 'var(--warning)', 'var(--text-muted)'][i % 4]
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  )}
+                </div>
 
-                <Collapsible title="By Model">
-                  <div className="space-y-2">
+                {/* Model Breakdown */}
+                <Collapsible title="Cost by Model" defaultOpen>
+                  <div className="space-y-3">
                     {Object.entries(costs.by_model || {}).sort((a, b) => b[1] - a[1]).map(([model, cost]) => (
                       <CostBar key={model} label={model.split('-').slice(0, 2).join('-')} value={cost} total={costs.total_cost_usd} />
                     ))}
                   </div>
                 </Collapsible>
 
-                <Collapsible title="Call Log">
+                {/* Call Log */}
+                <Collapsible title="Detailed Call Log">
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs font-mono">
                       <thead>
-                        <tr className="border-b border-[var(--paper-darker)]">
-                          <th className="text-left p-2">Phase</th>
-                          <th className="text-left p-2">Model</th>
-                          <th className="text-right p-2">In</th>
-                          <th className="text-right p-2">Out</th>
-                          <th className="text-right p-2">Cost</th>
+                        <tr className="border-b-2 border-[var(--border-default)]">
+                          <th className="text-left p-3 text-[var(--text-muted)]">Phase</th>
+                          <th className="text-left p-3 text-[var(--text-muted)]">Model</th>
+                          <th className="text-right p-3 text-[var(--text-muted)]">Input</th>
+                          <th className="text-right p-3 text-[var(--text-muted)]">Output</th>
+                          <th className="text-right p-3 text-[var(--text-muted)]">Cost</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {(costs.records || []).map((r, i) => (
-                          <tr key={i} className="border-b border-[var(--paper-darker)]">
-                            <td className="p-2 text-[var(--ink-faded)]">{r.phase}</td>
-                            <td className="p-2">{r.model.split('-').slice(0, 2).join('-')}</td>
-                            <td className="p-2 text-right text-[var(--ink-faded)]">{Math.round(r.input_tokens / 1000)}k</td>
-                            <td className="p-2 text-right text-[var(--ink-faded)]">{Math.round(r.output_tokens / 1000)}k</td>
-                            <td className="p-2 text-right">${r.cost_usd.toFixed(2)}</td>
+                        {(costs.records || []).slice(0, 20).map((r, i) => (
+                          <tr key={i} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] transition-colors">
+                            <td className="p-3 text-[var(--text-secondary)]">{r.phase}</td>
+                            <td className="p-3 text-[var(--accent)]">{r.model.split('-').slice(0, 2).join('-')}</td>
+                            <td className="p-3 text-right text-[var(--text-muted)]">{formatCompact(r.input_tokens)}</td>
+                            <td className="p-3 text-right text-[var(--text-muted)]">{formatCompact(r.output_tokens)}</td>
+                            <td className="p-3 text-right font-semibold text-[var(--text-primary)]">${r.cost_usd.toFixed(3)}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                    {(costs.records || []).length > 20 && (
+                      <div className="p-3 text-center text-xs text-[var(--text-ghost)]">
+                        Showing 20 of {costs.records.length} calls
+                      </div>
+                    )}
                   </div>
                 </Collapsible>
               </div>
             )}
 
             {reportTab === 'costs' && !costs && (
-              <p className="text-[var(--ink-ghost)]">No cost data available</p>
+              <p className="text-[var(--text-ghost)]">No cost data available</p>
             )}
           </div>
         </main>

@@ -319,6 +319,36 @@ class EvidenceStore:
 
         return [self._row_to_evidence(row) for row in rows]
 
+    async def find_by_url(self, url: str) -> Evidence | None:
+        """Find evidence by exact source URL.
+
+        Useful for cache lookups to avoid re-fetching.
+
+        Args:
+            url: Source URL to look up.
+
+        Returns:
+            Most recent Evidence record for URL, or None if not found.
+        """
+        if not self._db:
+            raise RuntimeError("EvidenceStore not initialized. Call init() first.")
+
+        async with self._db.execute(
+            """
+            SELECT * FROM evidence
+            WHERE source_url = ?
+            ORDER BY retrieved_at DESC
+            LIMIT 1
+            """,
+            (url,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        return self._row_to_evidence(row)
+
     async def count(self) -> int:
         """Get total count of evidence records."""
         if not self._db:

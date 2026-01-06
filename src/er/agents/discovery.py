@@ -23,8 +23,14 @@ from er.types import (
     Phase,
     ResearchGroup,
     RunState,
+    ThreadBrief,
     ThreadType,
     generate_id,
+)
+from er.utils.dates import (
+    get_latest_quarter_from_data,
+    format_quarter,
+    format_quarters_for_prompt,
 )
 
 
@@ -129,19 +135,25 @@ If a lens produces nothing meaningful, explicitly state "No findings" with reaso
 
 ---
 
+## QUARTERLY DATA CONTEXT
+
+{quarter_context}
+
+---
+
 ## LENS 1: Official Structure
 
 **Source:** JSON provided (no web search)
 
 **Task:** Extract from revenue_by_product in JSON:
 - Each segment name
-- Q3 2025 revenue
-- Q1→Q2→Q3 2025 growth trajectory
+- {latest_quarter} revenue
+- Quarterly growth trajectory (last 4 quarters)
 - Percent of total revenue
 
 **Required Output Fields:**
 - segment_name
-- q3_2025_revenue
+- latest_quarter_revenue
 - quarterly_trend (accelerating/stable/decelerating)
 - percent_of_total
 
@@ -184,7 +196,7 @@ This is your BASELINE. Not your final answer.
 **SUGGESTED SEARCHES (start with these, add more as needed):**
 - "{ticker} analyst rating upgrade downgrade {current_month} {current_year}"
 - "{ticker} bull vs bear case 2025"
-- "{ticker} earnings call analyst questions Q3 2025"
+- "{ticker} earnings call analyst questions {latest_quarter}"
 - Additional searches to understand analyst debates
 
 **Task:**
@@ -357,7 +369,7 @@ After completing ALL 7 lenses, output this JSON:
       "segments": [
         {{
           "name": "...",
-          "q3_2025_revenue_usd": 0,
+          "latest_quarter_revenue_usd": 0,
           "quarterly_trend": "accelerating|stable|decelerating",
           "percent_of_total": 0.0
         }}
@@ -486,11 +498,11 @@ After completing ALL 7 lenses, output this JSON:
 
 3. **AT LEAST ONE NON-OFFICIAL VERTICAL** - If all your verticals are official segments, you failed Lens 2, 4, 5, or 7.
 
-4. **SPECIFIC RESEARCH QUESTIONS** - Not "Is growth good?" but "What is Cloud revenue growth rate in Q3 2025 vs AWS?"
+4. **SPECIFIC RESEARCH QUESTIONS** - Not "Is growth good?" but "What is Cloud revenue growth rate in {latest_quarter} vs AWS?"
 
 5. **CITE YOUR SOURCES** - Each finding must say where it came from (JSON, which search, which transcript).
 
-6. **QUARTERLY DATA FIRST** - Q3 2025 is latest. FY2024 is old. Always cite quarters.
+6. **QUARTERLY DATA FIRST** - {latest_quarter} is latest. Always cite quarters, not annual figures.
 
 7. **5-8 VERTICALS MAX** - Prioritize by materiality. Not everything is worth researching.
 
@@ -570,13 +582,20 @@ class DiscoveryAgent(Agent):
         current_month = now.strftime("%B")  # e.g., "December"
         current_year = now.strftime("%Y")   # e.g., "2025"
 
+        # Get dynamic quarter from data (more accurate than current date)
+        latest_year, latest_qtr = get_latest_quarter_from_data(company_context)
+        latest_quarter = format_quarter(latest_year, latest_qtr)
+        quarter_context = format_quarters_for_prompt(latest_year, latest_qtr)
+
         prompt = DISCOVERY_PROMPT.format(
             date=today,
             current_month=current_month,
             current_year=current_year,
             ticker=company_context.symbol,
             company_name=company_context.company_name,
-            company_context=company_context.to_prompt_string(),
+            company_context=company_context.for_discovery(),
+            latest_quarter=latest_quarter,
+            quarter_context=quarter_context,
         )
 
         # Get OpenAI client
@@ -622,6 +641,21 @@ class DiscoveryAgent(Agent):
             response.content,
             company_context.evidence_ids,
         )
+
+        # Store ThreadBriefs in WorkspaceStore for downstream stages
+        if self.workspace_store and discovery_output.thread_briefs:
+            for brief in discovery_output.thread_briefs:
+                self.workspace_store.put_artifact(
+                    artifact_type="thread_brief",
+                    producer=self.name,
+                    json_obj=brief.to_dict(),
+                    summary=f"ThreadBrief for {brief.thread_id}: {brief.rationale[:100]}...",
+                    evidence_ids=brief.key_evidence_ids,
+                )
+            self.log_info(
+                "Stored thread briefs",
+                count=len(discovery_output.thread_briefs),
+            )
 
         # Update run state
         run_state.discovery_output = {
@@ -814,6 +848,82 @@ class DiscoveryAgent(Agent):
         # Data gaps from critical_information_gaps or information_gaps
         data_gaps = data.get("critical_information_gaps", data.get("information_gaps", data.get("data_gaps", [])))
 
+        # Generate ThreadBriefs from research_verticals
+        # ThreadBriefs capture WHY each thread was prioritized
+        thread_briefs = []
+        for v in data.get("research_verticals", []):
+            prompt_id = v.get("id", "")
+            thread_id = thread_id_map.get(prompt_id, "")
+            if not thread_id:
+                continue
+
+            # Extract info from lens_outputs to build rationale
+            source_lens = v.get("source_lens", "official_structure")
+            market_debate = v.get("market_debate", {})
+            current_state = v.get("current_state", {})
+
+            # Build rationale from why_it_matters and lens context
+            why_matters = v.get("why_it_matters", "")
+            bull_view = market_debate.get("bull_view", "")
+            bear_view = market_debate.get("bear_view", "")
+
+            rationale_parts = [why_matters]
+            if bull_view:
+                rationale_parts.append(f"Bull case: {bull_view}")
+            if bear_view:
+                rationale_parts.append(f"Bear case: {bear_view}")
+
+            rationale = " | ".join(p for p in rationale_parts if p)
+
+            # Build hypotheses from market debate
+            hypotheses = []
+            if bull_view:
+                hypotheses.append(f"If bull thesis correct: {bull_view}")
+            if bear_view:
+                hypotheses.append(f"If bear thesis correct: {bear_view}")
+            key_question = market_debate.get("key_question", "")
+            if key_question:
+                hypotheses.append(f"Key uncertainty: {key_question}")
+
+            # Research questions directly from vertical
+            key_questions = v.get("research_questions", [])
+
+            # Required evidence based on source lens
+            required_evidence = []
+            if source_lens == "official_structure":
+                required_evidence.append("10-K/10-Q segment disclosures")
+            elif source_lens == "competitive_cross_reference":
+                required_evidence.append("Competitor financials and market share data")
+            elif source_lens == "analyst_attention":
+                required_evidence.append("Analyst reports and price targets")
+            elif source_lens == "recent_developments":
+                required_evidence.append("Press releases and SEC filings")
+            elif source_lens == "asset_inventory":
+                required_evidence.append("Technology infrastructure assessments")
+            elif source_lens == "management_emphasis":
+                required_evidence.append("Earnings transcripts")
+            elif source_lens == "blind_spots":
+                required_evidence.append("Cross-reference multiple sources")
+
+            data_source = current_state.get("data_source", "")
+            if data_source and f"{data_source} data" not in required_evidence:
+                required_evidence.append(f"Primary data from: {data_source}")
+
+            # Confidence based on priority (1=highest confidence it matters)
+            priority = v.get("priority", 3)
+            confidence = max(0.3, 1.0 - (priority - 1) * 0.15)
+
+            brief = ThreadBrief(
+                thread_id=thread_id,
+                rationale=rationale,
+                hypotheses=hypotheses,
+                key_questions=key_questions,
+                required_evidence=required_evidence,
+                key_evidence_ids=list(base_evidence_ids),
+                confidence=confidence,
+            )
+            thread_briefs.append(brief)
+
         return DiscoveryOutput(
             official_segments=official_segments,
             research_threads=research_threads,
@@ -823,6 +933,7 @@ class DiscoveryAgent(Agent):
             data_gaps=data_gaps,
             conflicting_signals=data.get("conflicting_signals", []),
             evidence_ids=list(base_evidence_ids),
+            thread_briefs=thread_briefs,
         )
 
     async def close(self) -> None:

@@ -365,15 +365,26 @@ class AnthropicClient:
         self,
         request: LLMRequest,
         budget_tokens: int = 10000,
+        expected_output_tokens: int = 8000,
     ) -> LLMResponse:
         """Send a completion request with extended thinking.
 
         Extended thinking enables Claude to reason through complex problems
         step-by-step before providing a final answer.
 
+        IMPORTANT: max_tokens = budget_tokens + expected_output_tokens + buffer
+        The budget_tokens is a SUBSET of max_tokens, not additional. If you want
+        20K thinking and 15K output, you need max_tokens >= 35K.
+
         Args:
-            request: The LLM request.
+            request: The LLM request. Note: request.max_tokens is IGNORED in favor
+                     of computing it from budget_tokens + expected_output_tokens.
             budget_tokens: Maximum tokens for thinking blocks (min 1024).
+            expected_output_tokens: Expected tokens for visible output. This should
+                                   match what you expect the model to produce.
+                                   - Synthesis reports: 20000-25000
+                                   - Judge feedback: 8000-10000
+                                   - Short responses: 4000-8000
 
         Returns:
             LLM response with thinking content accessible via metadata.
@@ -394,15 +405,28 @@ class AnthropicClient:
         if budget_tokens < 1024:
             budget_tokens = 1024
 
+        # Ensure expected_output_tokens is reasonable
+        if expected_output_tokens < 1000:
+            expected_output_tokens = 1000
+
         try:
             # Convert messages
             system_message, messages = self._convert_messages(request.messages)
 
-            # Build the request parameters
-            # Note: max_tokens must be greater than budget_tokens
-            max_tokens = request.max_tokens or 16000
-            if max_tokens <= budget_tokens:
-                max_tokens = budget_tokens + 4096
+            # Compute max_tokens correctly:
+            # max_tokens = budget_tokens (for thinking) + expected_output_tokens + buffer
+            # The buffer accounts for slight variations in output length
+            buffer = 1000
+            max_tokens = budget_tokens + expected_output_tokens + buffer
+
+            # Log the configuration for debugging
+            logger.debug(
+                "Extended thinking configuration",
+                budget_tokens=budget_tokens,
+                expected_output_tokens=expected_output_tokens,
+                max_tokens=max_tokens,
+                model=request.model,
+            )
 
             params: dict[str, Any] = {
                 "model": request.model,
@@ -460,6 +484,17 @@ class AnthropicClient:
             latency_ms = int((time.monotonic() - start_time) * 1000)
             thinking_tokens = len(thinking_content) // 4  # Rough estimate
 
+            # Check for potential truncation (stop_reason indicates if output was cut off)
+            was_truncated = stop_reason == "max_tokens"
+            if was_truncated:
+                logger.warning(
+                    "Extended thinking output was truncated - consider increasing expected_output_tokens",
+                    output_tokens=output_tokens,
+                    expected_output_tokens=expected_output_tokens,
+                    budget_tokens=budget_tokens,
+                    max_tokens=max_tokens,
+                )
+
             return LLMResponse(
                 content=content,
                 model=model_name,
@@ -472,6 +507,9 @@ class AnthropicClient:
                     "thinking": thinking_content,
                     "thinking_tokens": thinking_tokens,
                     "budget_tokens": budget_tokens,
+                    "expected_output_tokens": expected_output_tokens,
+                    "max_tokens": max_tokens,
+                    "was_truncated": was_truncated,
                 },
             )
 
@@ -512,13 +550,28 @@ class AnthropicClient:
         stop=stop_after_attempt(5),
         reraise=True,
     )
-    async def complete_with_web_search(self, request: LLMRequest) -> LLMResponse:
+    async def complete_with_web_search(
+        self,
+        request: LLMRequest,
+        max_searches: int = 10,
+        allowed_domains: list[str] | None = None,
+    ) -> LLMResponse:
         """Send a completion request with web search capability.
 
         Uses Claude's built-in web search tool to find current information.
 
+        IMPORTANT: Each web search returns full page content from multiple results,
+        which can consume 60-80K tokens per search. With max_searches=10, this can
+        easily reach 600K+ input tokens. Use allowed_domains to restrict to high-quality
+        sources and reduce token consumption.
+
         Args:
             request: The LLM request.
+            max_searches: Maximum number of web searches to perform (default 10).
+                         Each search can consume ~60K tokens of context.
+            allowed_domains: Optional list of domains to restrict searches to.
+                           Recommended for cost control. Example:
+                           ["bloomberg.com", "reuters.com", "wsj.com", "seekingalpha.com"]
 
         Returns:
             LLM response with web search results incorporated.
@@ -532,18 +585,25 @@ class AnthropicClient:
             # Convert messages
             system_message, messages = self._convert_messages(request.messages)
 
+            # Build web search tool configuration
+            web_search_tool: dict[str, Any] = {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": max_searches,
+            }
+
+            # Add domain filtering to reduce token consumption
+            # Each search returns full page content, so restricting to
+            # high-quality sources helps control costs
+            if allowed_domains:
+                web_search_tool["allowed_domains"] = allowed_domains
+
             # Build the request parameters with web search tool
             params: dict[str, Any] = {
                 "model": request.model,
                 "messages": messages,
                 "max_tokens": request.max_tokens or 16000,
-                "tools": [
-                    {
-                        "type": "web_search_20250305",
-                        "name": "web_search",
-                        "max_uses": 10,  # Allow up to 10 searches
-                    }
-                ],
+                "tools": [web_search_tool],
             }
 
             if system_message:

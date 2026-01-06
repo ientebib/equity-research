@@ -47,16 +47,21 @@ from er.agents.data_orchestrator import DataOrchestratorAgent
 from er.agents.discovery import DiscoveryAgent
 from er.agents.external_discovery import ExternalDiscoveryAgent
 from er.agents.discovery_merger import DiscoveryMerger
+from er.agents.integrator import IntegratorAgent
 from er.agents.judge import JudgeAgent
 from er.agents.synthesizer import SynthesizerAgent
+from er.agents.verifier import VerificationAgent
 from er.agents.vertical_analyst import VerticalAnalystAgent
 from er.budget import BudgetTracker
 from er.config import Settings
+from er.coordinator.event_store import EventStore
 from er.evidence.store import EvidenceStore
 from er.llm.router import LLMRouter
-from er.logging import get_logger
+from er.logging import get_logger, log_context, set_run_id, set_phase
+from er.workspace.store import WorkspaceStore
 from er.types import (
     CompanyContext,
+    CrossVerticalMap,
     DiscoveryOutput,
     EditorialFeedback,
     GroupResearchOutput,
@@ -64,6 +69,7 @@ from er.types import (
     ResearchGroup,
     RunState,
     SynthesisOutput,
+    VerifiedResearchPackage,
     VerticalAnalysis,
 )
 
@@ -165,13 +171,15 @@ class PipelineResult:
 
 
 class ResearchPipeline:
-    """6-stage equity research pipeline coordinator."""
+    """8-stage equity research pipeline coordinator."""
 
     # Stage definitions for progress tracking
     STAGES = {
         1: "Data Collection",
         2: "Discovery",
         3: "Deep Research",
+        3.5: "Verification",
+        3.75: "Integration",
         4: "Dual Synthesis",
         5: "Editorial Review",
         6: "Revision",
@@ -206,12 +214,19 @@ class ResearchPipeline:
         )
         self.llm_router = LLMRouter(settings=self.settings)
 
-        # Create agent context
+        # Event store for audit trail (initialized in run())
+        self.event_store: EventStore | None = None
+
+        # Workspace store (initialized per run in run())
+        self.workspace_store: WorkspaceStore | None = None
+
+        # Create agent context (workspace_store added in run())
         self.agent_context = AgentContext(
             settings=self.settings,
             llm_router=self.llm_router,
             evidence_store=self.evidence_store,
             budget_tracker=self.budget_tracker,
+            workspace_store=None,  # Set per-run
         )
 
         # Initialize agents
@@ -219,6 +234,8 @@ class ResearchPipeline:
         self._discovery_agent: DiscoveryAgent | None = None
         self._external_discovery_agent: ExternalDiscoveryAgent | None = None
         self._discovery_merger: DiscoveryMerger | None = None
+        self._verifier: VerificationAgent | None = None
+        self._integrator: IntegratorAgent | None = None
         self._synthesizer: SynthesizerAgent | None = None
         self._judge: JudgeAgent | None = None
 
@@ -401,6 +418,7 @@ class ResearchPipeline:
         return EditorialFeedback(
             preferred_synthesis=data.get("preferred_synthesis", "claude"),
             preference_reasoning=data.get("preference_reasoning", ""),
+            rejection_reason=data.get("rejection_reason"),  # None if not reject_both
             claude_score=data.get("claude_score", 0.5),
             gpt_score=data.get("gpt_score", 0.5),
             key_differentiators=data.get("key_differentiators", []),
@@ -476,6 +494,46 @@ class ResearchPipeline:
         except Exception as e:
             logger.warning(f"Progress callback failed: {e}")
 
+    async def _log_stage_event(
+        self,
+        run_state: RunState,
+        phase: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        """Log a stage event to the event store for audit trail.
+
+        Args:
+            run_state: Current run state.
+            phase: Stage/phase name (e.g., "discovery", "synthesis").
+            status: Event status (e.g., "starting", "complete", "error").
+            detail: Additional detail about the event.
+        """
+        if self.event_store is None:
+            return
+
+        from er.types import AgentMessage, MessageType
+
+        message = AgentMessage.create(
+            run_id=run_state.run_id,
+            from_agent="pipeline",
+            to_agent="coordinator",
+            message_type=MessageType.HANDOFF if status == "complete" else MessageType.RESEARCH_COMPLETE,
+            content=f"{phase}: {status} - {detail}" if detail else f"{phase}: {status}",
+            context={
+                "phase": phase,
+                "status": status,
+                "detail": detail,
+                "ticker": run_state.ticker,
+                "cost_usd": self.budget_tracker.total_cost_usd if self.budget_tracker else 0.0,
+            },
+        )
+
+        try:
+            await self.event_store.append(message)
+        except Exception as e:
+            logger.warning(f"Failed to log stage event: {e}")
+
     async def run(self, ticker: str) -> PipelineResult:
         """Run the complete 6-stage pipeline for a ticker.
 
@@ -517,8 +575,33 @@ class ResearchPipeline:
             budget_remaining_usd=self.config.max_budget_usd or 1000.0,
         )
 
+        # Set logging context for all subsequent operations
+        set_run_id(run_state.run_id)
+
+        # Initialize event store for audit trail
+        if self.config.output_dir:
+            self.event_store = EventStore(output_dir=self.config.output_dir)
+            await self.event_store.init(run_state.run_id)
+            logger.info(
+                "Event store initialized",
+                run_id=run_state.run_id,
+                output_dir=str(self.config.output_dir),
+            )
+
+            # Initialize workspace store for structured artifacts
+            workspace_db_path = self.config.output_dir / "workspace.db"
+            self.workspace_store = WorkspaceStore(workspace_db_path)
+            self.workspace_store.init()
+            self.agent_context.workspace_store = self.workspace_store
+            logger.info(
+                "Workspace store initialized",
+                run_id=run_state.run_id,
+                workspace_db=str(workspace_db_path),
+            )
+
         try:
             # ============== STAGE 1: Data Orchestrator ==============
+            set_phase("data_collection")
             if 1 in completed_stages:
                 self._emit_progress(1, "complete", "Loaded from checkpoint")
                 logger.info("Stage 1: Loading from checkpoint", ticker=ticker)
@@ -530,9 +613,11 @@ class ResearchPipeline:
                 logger.info("Stage 1: Data Orchestrator", ticker=ticker)
                 company_context = await self._run_data_orchestrator(run_state)
                 self._save_stage_output("stage1_company_context", company_context)
+                await self._log_stage_event(run_state, "data_collection", "complete", company_context.company_name)
                 self._emit_progress(1, "complete", f"Loaded {company_context.company_name}")
 
             # ============== STAGE 2: Discovery ==============
+            set_phase("discovery")
             if 2 in completed_stages:
                 self._emit_progress(2, "complete", "Loaded from checkpoint")
                 logger.info("Stage 2: Loading from checkpoint", ticker=ticker)
@@ -544,9 +629,11 @@ class ResearchPipeline:
                 logger.info("Stage 2: Discovery", ticker=ticker)
                 discovery_output = await self._run_discovery(run_state, company_context)
                 self._save_stage_output("stage2_discovery", discovery_output)
+                await self._log_stage_event(run_state, "discovery", "complete", f"{len(discovery_output.research_threads)} threads")
                 self._emit_progress(2, "complete", f"Found {len(discovery_output.research_threads)} research verticals")
 
             # ============== STAGE 3: Deep Research (2 Parallel Groups) ==============
+            set_phase("deep_research")
             if 3 in completed_stages:
                 self._emit_progress(3, "complete", "Loaded from checkpoint")
                 logger.info("Stage 3: Loading from checkpoint", ticker=ticker)
@@ -564,9 +651,53 @@ class ResearchPipeline:
                 )
                 self._save_stage_output("stage3_group_research", group_research_outputs)
                 self._save_stage_output("stage3_verticals", vertical_analyses)
+                await self._log_stage_event(run_state, "deep_research", "complete", f"{len(vertical_analyses)} verticals")
                 self._emit_progress(3, "complete", f"Completed {len(vertical_analyses)} vertical analyses")
 
+            # ============== STAGE 3.5: Verification ==============
+            set_phase("verification")
+            self._emit_progress(3.5, "starting", "Verifying facts against ground truth data...")
+            logger.info("Stage 3.5: Verification", ticker=ticker)
+
+            verified_package = await self._run_verification(
+                run_state,
+                company_context,
+                group_research_outputs,
+            )
+            self._save_stage_output("stage3_5_verification", verified_package)
+            await self._log_stage_event(
+                run_state, "verification", "complete",
+                f"{verified_package.verified_count}/{verified_package.total_facts} verified"
+            )
+            self._emit_progress(
+                3.5, "complete",
+                f"Verified {verified_package.verified_count}/{verified_package.total_facts} facts, "
+                f"{verified_package.contradicted_count} contradictions"
+            )
+
+            # ============== STAGE 3.75: Integration ==============
+            set_phase("integration")
+            self._emit_progress(3.75, "starting", "Finding cross-vertical patterns and dependencies...")
+            logger.info("Stage 3.75: Integration", ticker=ticker)
+
+            cross_vertical_map = await self._run_integration(
+                run_state,
+                verified_package,
+                company_context.company_name,
+            )
+            self._save_stage_output("stage3_75_integration", cross_vertical_map)
+            await self._log_stage_event(
+                run_state, "integration", "complete",
+                f"{len(cross_vertical_map.relationships)} relationships, {len(cross_vertical_map.shared_risks)} shared risks"
+            )
+            self._emit_progress(
+                3.75, "complete",
+                f"Found {len(cross_vertical_map.relationships)} relationships, "
+                f"{len(cross_vertical_map.shared_risks)} shared risks"
+            )
+
             # ============== STAGE 4: Dual Synthesis (Parallel) ==============
+            set_phase("synthesis")
             if 4 in completed_stages:
                 self._emit_progress(4, "complete", "Loaded from checkpoint")
                 logger.info("Stage 4: Loading from checkpoint", ticker=ticker)
@@ -582,12 +713,16 @@ class ResearchPipeline:
                     company_context,
                     discovery_output,
                     vertical_analyses,
+                    verified_package=verified_package,
+                    cross_vertical_map=cross_vertical_map,
                 )
                 self._save_stage_output("stage4_claude_synthesis", claude_synthesis)
                 self._save_stage_output("stage4_gpt_synthesis", gpt_synthesis)
+                await self._log_stage_event(run_state, "synthesis", "complete", f"Claude:{claude_synthesis.investment_view} GPT:{gpt_synthesis.investment_view}")
                 self._emit_progress(4, "complete", f"Claude: {claude_synthesis.investment_view} | GPT: {gpt_synthesis.investment_view}")
 
             # ============== STAGE 5: Editorial Review ==============
+            set_phase("editorial_review")
             if 5 in completed_stages:
                 self._emit_progress(5, "complete", "Loaded from checkpoint")
                 logger.info("Stage 5: Loading from checkpoint", ticker=ticker)
@@ -604,6 +739,7 @@ class ResearchPipeline:
                     company_context,
                     claude_synthesis,
                     gpt_synthesis,
+                    verified_package=verified_package,
                 )
 
                 logger.info(
@@ -615,26 +751,48 @@ class ResearchPipeline:
                     insights_to_incorporate=len(editorial_feedback.incorporate_from_other),
                 )
                 self._save_stage_output("stage5_editorial_feedback", editorial_feedback)
+                await self._log_stage_event(run_state, "editorial_review", "complete", f"Winner:{editorial_feedback.preferred_synthesis}")
                 self._emit_progress(5, "complete", f"Winner: {editorial_feedback.preferred_synthesis.upper()} ({editorial_feedback.claude_score:.1f} vs {editorial_feedback.gpt_score:.1f})")
 
             # ============== STAGE 6: Revision ==============
+            set_phase("revision")
             # Stage 6 always runs (it's the final output)
-            self._emit_progress(6, "starting", f"Revising {editorial_feedback.preferred_synthesis.upper()} synthesis with editorial feedback...")
-            logger.info("Stage 6: Synthesis Revision", ticker=ticker)
 
-            # Get the winning synthesis
-            if editorial_feedback.preferred_synthesis == "claude":
-                winning_synthesis = claude_synthesis
+            # Handle reject_both case - re-synthesize with rejection instructions
+            if editorial_feedback.preferred_synthesis == "reject_both":
+                self._emit_progress(6, "starting", "Both syntheses rejected - re-synthesizing...")
+                logger.warning(
+                    "Both syntheses rejected by Judge",
+                    ticker=ticker,
+                    rejection_reason=editorial_feedback.rejection_reason,
+                )
+
+                # Re-run synthesis with rejection instructions
+                # Use Claude as the default re-synthesizer with the rejection reason as guidance
+                final_report = await self._run_resynthesis(
+                    run_state,
+                    company_context,
+                    discovery,
+                    vertical_analyses,
+                    editorial_feedback,
+                )
             else:
-                winning_synthesis = gpt_synthesis
+                self._emit_progress(6, "starting", f"Revising {editorial_feedback.preferred_synthesis.upper()} synthesis with editorial feedback...")
+                logger.info("Stage 6: Synthesis Revision", ticker=ticker)
 
-            # Revise the winning synthesis based on editorial feedback
-            final_report = await self._run_revision(
-                run_state,
-                company_context,
-                winning_synthesis,
-                editorial_feedback,
-            )
+                # Get the winning synthesis
+                if editorial_feedback.preferred_synthesis == "claude":
+                    winning_synthesis = claude_synthesis
+                else:
+                    winning_synthesis = gpt_synthesis
+
+                # Revise the winning synthesis based on editorial feedback
+                final_report = await self._run_revision(
+                    run_state,
+                    company_context,
+                    winning_synthesis,
+                    editorial_feedback,
+                )
             self._emit_progress(6, "complete", f"Final verdict: {final_report.investment_view} ({final_report.conviction} conviction)")
 
             logger.info(
@@ -645,6 +803,7 @@ class ResearchPipeline:
                 report_len=len(final_report.full_report),
             )
             self._save_stage_output("stage6_final_report", final_report)
+            await self._log_stage_event(run_state, "revision", "complete", f"{final_report.investment_view} ({final_report.conviction})")
 
             # Calculate totals
             end_time = asyncio.get_event_loop().time()
@@ -835,12 +994,19 @@ class ResearchPipeline:
             total_verticals=len(discovery_output.research_threads),
         )
 
-        # Run research groups in parallel (2 groups max)
-        async def research_group(group: ResearchGroup) -> GroupResearchOutput:
-            # Get threads for this group
+        # Build all groups with their threads for co-analyst coordination
+        all_groups_with_threads: list[tuple[ResearchGroup, list[DiscoveredThread]]] = []
+        for group in research_groups[:2]:  # Max 2 groups
             threads = discovery_output.get_threads_for_group(group)
+            all_groups_with_threads.append((group, threads))
 
-            if not threads:
+        # Run research groups in parallel (2 groups max)
+        async def research_group(
+            group: ResearchGroup,
+            group_threads: list[DiscoveredThread],
+            other_groups: list[tuple[ResearchGroup, list[DiscoveredThread]]],
+        ) -> GroupResearchOutput:
+            if not group_threads:
                 logger.warning(
                     "No threads found for group",
                     group=group.name,
@@ -864,15 +1030,22 @@ class ResearchPipeline:
                     run_state,
                     company_context,
                     group,
-                    threads,
+                    group_threads,
                     use_deep_research=self.config.use_deep_research_verticals,
+                    other_groups=other_groups,  # Pass other groups for co-analyst coordination!
                 )
             finally:
                 await agent.close()
 
-        # Run both groups in parallel
+        # Run both groups in parallel, passing each group info about the other
+        async def run_group_with_context(idx: int) -> GroupResearchOutput:
+            group, threads = all_groups_with_threads[idx]
+            # Other groups = all groups except this one
+            other = [g for i, g in enumerate(all_groups_with_threads) if i != idx]
+            return await research_group(group, threads, other)
+
         group_results = await asyncio.gather(
-            *[research_group(g) for g in research_groups[:2]],  # Max 2 groups
+            *[run_group_with_context(i) for i in range(len(all_groups_with_threads))],
             return_exceptions=True,
         )
 
@@ -958,12 +1131,64 @@ class ResearchPipeline:
 
         return groups
 
+    async def _run_verification(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        group_outputs: list[GroupResearchOutput],
+    ) -> VerifiedResearchPackage:
+        """Stage 3.5: Verify facts against ground truth data.
+
+        Args:
+            run_state: Current run state.
+            company_context: Company data with ground truth financials.
+            group_outputs: Research outputs containing facts to verify.
+
+        Returns:
+            VerifiedResearchPackage with verification results.
+        """
+        if self._verifier is None:
+            self._verifier = VerificationAgent(self.agent_context)
+
+        return await self._verifier.run(
+            run_state,
+            company_context,
+            group_outputs,
+        )
+
+    async def _run_integration(
+        self,
+        run_state: RunState,
+        verified_package: VerifiedResearchPackage,
+        company_name: str,
+    ) -> CrossVerticalMap:
+        """Stage 3.75: Find cross-vertical patterns and dependencies.
+
+        Args:
+            run_state: Current run state.
+            verified_package: Verified research package from Stage 3.5.
+            company_name: Company name for context.
+
+        Returns:
+            CrossVerticalMap with relationships, shared risks, and insights.
+        """
+        if self._integrator is None:
+            self._integrator = IntegratorAgent(self.agent_context)
+
+        return await self._integrator.run(
+            run_state,
+            verified_package,
+            company_name=company_name,
+        )
+
     async def _run_synthesis(
         self,
         run_state: RunState,
         company_context: CompanyContext,
         discovery_output: DiscoveryOutput,
         vertical_analyses: list[VerticalAnalysis],
+        verified_package: VerifiedResearchPackage | None = None,
+        cross_vertical_map: CrossVerticalMap | None = None,
     ) -> tuple[SynthesisOutput, SynthesisOutput]:
         """Stage 4: Dual synthesis with Claude and GPT."""
         if self._synthesizer is None:
@@ -974,6 +1199,8 @@ class ResearchPipeline:
             company_context,
             discovery_output,
             vertical_analyses,
+            verified_package=verified_package,
+            cross_vertical_map=cross_vertical_map,
             output_dir=self.config.output_dir,
         )
 
@@ -983,6 +1210,7 @@ class ResearchPipeline:
         company_context: CompanyContext,
         claude_synthesis: SynthesisOutput,
         gpt_synthesis: SynthesisOutput,
+        verified_package: VerifiedResearchPackage | None = None,
     ) -> EditorialFeedback:
         """Stage 5: Editorial review by the Judge.
 
@@ -994,6 +1222,7 @@ class ResearchPipeline:
             company_context: Company data context.
             claude_synthesis: Claude's synthesis output.
             gpt_synthesis: GPT's synthesis output.
+            verified_package: Verified research package for citation checking.
 
         Returns:
             EditorialFeedback with revision instructions.
@@ -1006,6 +1235,7 @@ class ResearchPipeline:
             company_context,
             claude_synthesis,
             gpt_synthesis,
+            verified_package=verified_package,
         )
 
     async def _run_revision(
@@ -1036,6 +1266,46 @@ class ResearchPipeline:
             feedback,
         )
 
+    async def _run_resynthesis(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        discovery: DiscoveryOutput,
+        vertical_analyses: list[VerticalAnalysis],
+        feedback: EditorialFeedback,
+    ) -> SynthesisOutput:
+        """Re-synthesize after Judge rejects both reports.
+
+        When both Claude and GPT syntheses are rejected, we re-run synthesis
+        with the rejection reason as additional guidance.
+
+        Args:
+            run_state: Current run state.
+            company_context: Company data context.
+            discovery: Discovery output.
+            vertical_analyses: Vertical analyses.
+            feedback: Editorial feedback with rejection_reason.
+
+        Returns:
+            New SynthesisOutput from re-synthesis.
+        """
+        if self._synthesizer is None:
+            self._synthesizer = SynthesizerAgent(self.agent_context)
+
+        logger.info(
+            "Re-running synthesis after rejection",
+            ticker=run_state.ticker,
+            rejection_reason=feedback.rejection_reason,
+        )
+
+        return await self._synthesizer.resynthesis(
+            run_state,
+            company_context,
+            discovery,
+            vertical_analyses,
+            feedback,
+        )
+
     async def close(self) -> None:
         """Close all agents and resources."""
         if self._data_orchestrator:
@@ -1050,12 +1320,29 @@ class ResearchPipeline:
         if self._discovery_merger:
             await self._discovery_merger.close()
             self._discovery_merger = None
+        if self._verifier:
+            await self._verifier.close()
+            self._verifier = None
+        if self._integrator:
+            await self._integrator.close()
+            self._integrator = None
         if self._synthesizer:
             await self._synthesizer.close()
             self._synthesizer = None
         if self._judge:
             await self._judge.close()
             self._judge = None
+        # Close event store
+        if self.event_store:
+            await self.event_store.close()
+            self.event_store = None
+        # Close workspace store
+        if self.workspace_store:
+            self.workspace_store.close()
+            self.workspace_store = None
+        # Clear logging context
+        set_run_id(None)
+        set_phase(None)
 
 
 async def run_research(

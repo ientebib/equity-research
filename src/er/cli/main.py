@@ -23,6 +23,7 @@ from er import __version__
 from er.config import Settings, clear_settings_cache, get_settings
 from er.exceptions import ConfigurationError
 from er.types import Phase, RunState, utc_now
+from er.utils.dates import get_latest_quarter, get_quarter_range, format_quarter
 
 app = typer.Typer(
     name="er",
@@ -46,7 +47,7 @@ def _get_settings_safe() -> Settings | None:
 def _load_transcripts_from_dir(ticker: str, transcripts_dir: Path, num_quarters: int = 4) -> list[dict]:
     """Load transcripts from text files in a directory.
 
-    Expected files: q3_2025.txt, q2_2025.txt, q1_2025.txt, q4_2024.txt
+    Expected files: q3_2025.txt, q2_2025.txt, etc. (based on current quarter)
 
     Args:
         ticker: Stock ticker symbol.
@@ -56,27 +57,16 @@ def _load_transcripts_from_dir(ticker: str, transcripts_dir: Path, num_quarters:
     Returns:
         List of transcript dicts.
     """
-    import re
-
     console.print()
     console.print(f"[cyan]Loading transcripts from:[/cyan] {transcripts_dir}")
 
-    # Calculate quarters (Q3 2025 -> Q2 2025 -> Q1 2025 -> Q4 2024)
-    current_year = 2025
-    current_quarter = 3
-
-    quarters_to_load = []
-    q, y = current_quarter, current_year
-    for _ in range(num_quarters):
-        quarters_to_load.append((q, y))
-        q -= 1
-        if q == 0:
-            q = 4
-            y -= 1
+    # Dynamically compute quarters based on current date
+    current_year, current_quarter = get_latest_quarter()
+    quarters_to_load = get_quarter_range(current_year, current_quarter, num_quarters)
 
     transcripts = []
 
-    for quarter, year in quarters_to_load:
+    for year, quarter in quarters_to_load:
         # Try different file name patterns
         patterns = [
             f"q{quarter}_{year}.txt",
@@ -143,23 +133,13 @@ def _collect_transcripts(ticker: str, num_quarters: int = 4) -> list[dict]:
         )
     )
 
-    # Calculate quarters to collect (starting from Q3 2025 going back)
-    # Current: Q3 2025 -> Q2 2025 -> Q1 2025 -> Q4 2024
-    current_year = 2025
-    current_quarter = 3
-
-    quarters_to_collect = []
-    q, y = current_quarter, current_year
-    for _ in range(num_quarters):
-        quarters_to_collect.append((q, y))
-        q -= 1
-        if q == 0:
-            q = 4
-            y -= 1
+    # Dynamically compute quarters based on current date
+    current_year, current_quarter = get_latest_quarter()
+    quarters_to_collect = get_quarter_range(current_year, current_quarter, num_quarters)
 
     transcripts = []
 
-    for i, (quarter, year) in enumerate(quarters_to_collect, 1):
+    for i, (year, quarter) in enumerate(quarters_to_collect, 1):
         console.print()
         console.print(f"[bold cyan]({i}/{num_quarters}) Q{quarter} {year} Transcript[/bold cyan]")
         console.print("[dim]Paste transcript below. Press Enter twice when done, or type 'skip' to skip this quarter:[/dim]")

@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "equity-research",
+			"path": ".."
+		},
+		{
+			"name": "equity-research-prompts",
+			"path": "../../Downloads/equity-research-prompts"
+		}
+	],
+	"settings": {}
+}

@@ -18,11 +18,20 @@ from er.llm.openai_client import OpenAIClient
 from er.types import (
     CompanyContext,
     DiscoveredThread,
+    Fact,
+    FactCategory,
     GroupResearchOutput,
     Phase,
     ResearchGroup,
     RunState,
     VerticalAnalysis,
+    VerticalDossier,
+    generate_id,
+)
+from er.utils.dates import (
+    get_latest_quarter_from_data,
+    format_quarter,
+    format_quarters_for_prompt,
 )
 
 
@@ -36,16 +45,11 @@ CURRENT MONTH: {current_month} {current_year}
 
 Your training data is STALE. You MUST use web search for anything that may have changed.
 
-## QUARTERLY DATA IS THE LATEST
+## QUARTERLY DATA CONTEXT
 
-The JSON contains data through Q3 2025:
-- Q3 2025 = MOST RECENT (use this as baseline)
-- Q2 2025, Q1 2025 = Recent quarters (analyze the TREND)
-- FY 2024 = OLD - one year ago, historical context only
+{quarter_context}
 
-ALWAYS cite quarterly data. "Q3 2025 revenue was $X" not "annual revenue is $Y"
-
-**DO NOT USE FY2024** as "current" state. FY2024 data is 12+ months old. Only use for historical comparison.
+**DO NOT USE** annual data as "current" state. Annual data is 12+ months old. Only use for historical comparison.
 
 ## GROUND TRUTH DATA (DO NOT CONTRADICT)
 
@@ -138,8 +142,8 @@ You MUST execute targeted searches. Claiming to search without actually searchin
 For EACH vertical:
 
 ### 1. Financial Analysis (FROM JSON ONLY)
-- Q3 2025 revenue and growth
-- Q1->Q2->Q3 2025 trend (accelerating/decelerating?)
+- {latest_quarter} revenue and growth
+- Quarterly trend (accelerating/decelerating?)
 - Margin trajectory if available
 - DO NOT invent numbers. Use JSON or say "not available"
 
@@ -193,8 +197,8 @@ DO:
 3-4 sentences. What is this vertical and what does it do? (Factual, no opinion)
 
 ### Financial Performance (FROM JSON ONLY)
-- Q3 2025 revenue: $X (+Y% YoY)
-- Quarterly trajectory: Q1→Q2→Q3 trend (accelerating/stable/decelerating)
+- {latest_quarter} revenue: $X (+Y% YoY)
+- Quarterly trajectory (accelerating/stable/decelerating)
 - Margin: X% or "not disclosed"
 - Source: Cite which JSON field you used
 
@@ -400,6 +404,14 @@ class VerticalAnalystAgent(Agent):
         current_month = now.strftime("%B")
         current_year = now.strftime("%Y")
 
+        # Get dynamic quarter from data (more accurate than current date)
+        latest_year, latest_qtr = get_latest_quarter_from_data(company_context)
+        latest_quarter = format_quarter(latest_year, latest_qtr)
+        quarter_context = format_quarters_for_prompt(latest_year, latest_qtr)
+
+        # Get verticals from this group for context filtering
+        thread_names = [t.name for t in threads]
+
         prompt = DEEP_RESEARCH_PROMPT.format(
             date=today,
             current_month=current_month,
@@ -411,7 +423,9 @@ class VerticalAnalystAgent(Agent):
             group_focus=research_group.focus,
             verticals_detail=verticals_detail,
             other_groups_detail=other_groups_detail,
-            company_context=company_context.to_prompt_string(max_tokens=15000),
+            company_context=company_context.for_deep_research(thread_names),
+            latest_quarter=latest_quarter,
+            quarter_context=quarter_context,
         )
 
         # Get OpenAI client
@@ -469,6 +483,25 @@ class VerticalAnalystAgent(Agent):
             company_context.evidence_ids,
         )
 
+        # Store VerticalDossiers in WorkspaceStore for downstream stages
+        if self.workspace_store:
+            for va in group_output.vertical_analyses:
+                if va.dossier:
+                    self.workspace_store.put_artifact(
+                        artifact_type="vertical_dossier",
+                        producer=self.name,
+                        json_obj=va.dossier.to_dict(),
+                        summary=f"Dossier for {va.vertical_name}: {len(va.facts)} facts",
+                        evidence_ids=va.evidence_ids,
+                    )
+            total_facts = sum(len(va.facts) for va in group_output.vertical_analyses)
+            self.log_info(
+                "Stored vertical dossiers",
+                group=research_group.name,
+                dossiers=len(group_output.vertical_analyses),
+                total_facts=total_facts,
+            )
+
         self.log_info(
             "Completed group research",
             ticker=run_state.ticker,
@@ -478,6 +511,235 @@ class VerticalAnalystAgent(Agent):
         )
 
         return group_output
+
+    def _extract_facts_from_prose(
+        self,
+        section: str,
+        thread_id: str,
+        base_evidence_ids: list[str],
+    ) -> list[Fact]:
+        """Extract structured facts from prose research section.
+
+        Parses the markdown prose to identify factual claims in different
+        categories: financial, competitive, development, risk, tailwind, headwind.
+
+        Args:
+            section: The prose section for a vertical.
+            thread_id: ID of the research thread.
+            base_evidence_ids: Evidence IDs to link facts to.
+
+        Returns:
+            List of Fact objects extracted from the prose.
+        """
+        facts = []
+        default_evidence_id = base_evidence_ids[0] if base_evidence_ids else ""
+
+        # Extract financial facts from "Financial Performance" section
+        financial_match = re.search(
+            r'### Financial Performance.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if financial_match:
+            financial_text = financial_match.group(0)
+            # Look for revenue/growth patterns like "$X (+Y% YoY)"
+            rev_matches = re.findall(
+                r'(\$[\d.]+[BMK]?\s*\([+-]?[\d.]+%[^)]*\))',
+                financial_text
+            )
+            for match in rev_matches[:5]:  # Limit to 5 financial facts
+                facts.append(Fact(
+                    fact_id=generate_id("fact"),
+                    statement=f"Financial metric: {match}",
+                    category=FactCategory.FINANCIAL,
+                    evidence_id=default_evidence_id,
+                    source="Company financials (JSON)",
+                    confidence=0.9,
+                    vertical_id=thread_id,
+                ))
+
+        # Extract competitive facts from "Competitive Landscape" section
+        competitive_match = re.search(
+            r'### Competitive Landscape.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if competitive_match:
+            competitive_text = competitive_match.group(0)
+            # Look for market share patterns
+            share_matches = re.findall(
+                r'market share[:\s]+(\d+%)[^.]*',
+                competitive_text,
+                re.IGNORECASE
+            )
+            for match in share_matches[:3]:
+                facts.append(Fact(
+                    fact_id=generate_id("fact"),
+                    statement=f"Market share: {match}",
+                    category=FactCategory.COMPETITIVE,
+                    evidence_id=default_evidence_id,
+                    source="Web research",
+                    confidence=0.6,
+                    vertical_id=thread_id,
+                ))
+
+        # Extract recent developments
+        dev_match = re.search(
+            r'### Recent Developments.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if dev_match:
+            dev_text = dev_match.group(0)
+            # Look for bullet points with dates
+            dev_items = re.findall(
+                r'[-•]\s*([^-•\n]+)',
+                dev_text
+            )
+            for item in dev_items[:5]:
+                if len(item.strip()) > 20:  # Skip short fragments
+                    facts.append(Fact(
+                        fact_id=generate_id("fact"),
+                        statement=item.strip(),
+                        category=FactCategory.DEVELOPMENT,
+                        evidence_id=default_evidence_id,
+                        source="Web research",
+                        confidence=0.5,
+                        vertical_id=thread_id,
+                    ))
+
+        # Extract tailwinds
+        tailwind_match = re.search(
+            r'\*\*Tailwinds?\*\*.*?(?=\*\*Headwinds?\*\*|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if tailwind_match:
+            tailwind_text = tailwind_match.group(0)
+            tailwind_items = re.findall(r'[-•]\s*([^-•\n]+)', tailwind_text)
+            for item in tailwind_items[:4]:
+                if len(item.strip()) > 15:
+                    facts.append(Fact(
+                        fact_id=generate_id("fact"),
+                        statement=item.strip(),
+                        category=FactCategory.TAILWIND,
+                        evidence_id=default_evidence_id,
+                        source="Research analysis",
+                        confidence=0.5,
+                        vertical_id=thread_id,
+                    ))
+
+        # Extract headwinds
+        headwind_match = re.search(
+            r'\*\*Headwinds?\*\*.*?(?=TAM|Risk|###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if headwind_match:
+            headwind_text = headwind_match.group(0)
+            headwind_items = re.findall(r'[-•]\s*([^-•\n]+)', headwind_text)
+            for item in headwind_items[:4]:
+                if len(item.strip()) > 15:
+                    facts.append(Fact(
+                        fact_id=generate_id("fact"),
+                        statement=item.strip(),
+                        category=FactCategory.HEADWIND,
+                        evidence_id=default_evidence_id,
+                        source="Research analysis",
+                        confidence=0.5,
+                        vertical_id=thread_id,
+                    ))
+
+        # Extract risk factors
+        risk_match = re.search(
+            r'### Risk Factors.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if risk_match:
+            risk_text = risk_match.group(0)
+            risk_items = re.findall(r'\*\*Risk \d+\*\*:?\s*([^*\n]+)', risk_text)
+            for item in risk_items[:5]:
+                facts.append(Fact(
+                    fact_id=generate_id("fact"),
+                    statement=item.strip(),
+                    category=FactCategory.RISK,
+                    evidence_id=default_evidence_id,
+                    source="Research analysis",
+                    confidence=0.5,
+                    vertical_id=thread_id,
+                ))
+
+        return facts
+
+    def _create_dossier(
+        self,
+        thread: DiscoveredThread | None,
+        vertical_name: str,
+        section: str,
+        facts: list[Fact],
+        confidence: float,
+        base_evidence_ids: list[str],
+    ) -> VerticalDossier:
+        """Create a VerticalDossier from parsed prose and facts.
+
+        Args:
+            thread: The research thread (may be None).
+            vertical_name: Name of the vertical.
+            section: Full prose section.
+            facts: Extracted facts.
+            confidence: Overall confidence score.
+            base_evidence_ids: Evidence IDs.
+
+        Returns:
+            VerticalDossier for this vertical.
+        """
+        thread_id = thread.thread_id if thread else ""
+
+        # Extract unanswered questions from "Key Uncertainties" section
+        unanswered = []
+        uncertainty_match = re.search(
+            r'### Key Uncertainties.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if uncertainty_match:
+            uncertainty_items = re.findall(
+                r'[-•]\s*([^-•\n]+)',
+                uncertainty_match.group(0)
+            )
+            unanswered = [item.strip() for item in uncertainty_items[:5] if item.strip()]
+
+        # Extract data gaps from "Research Quality" section
+        data_gaps = []
+        quality_match = re.search(
+            r'### Research Quality.*?(?=###|\Z)',
+            section,
+            re.DOTALL | re.IGNORECASE
+        )
+        if quality_match:
+            gaps_match = re.search(r'Gaps?:?\s*([^\n]+)', quality_match.group(0))
+            if gaps_match:
+                data_gaps = [gaps_match.group(1).strip()]
+
+        # Count sources
+        source_count = len(re.findall(r'source:', section, re.IGNORECASE))
+        recent_count = len(re.findall(r'202[5-9]|2030', section))  # Recent years
+
+        return VerticalDossier(
+            dossier_id=generate_id("dossier"),
+            thread_id=thread_id,
+            vertical_name=vertical_name,
+            facts=facts,
+            analysis_narrative=section,
+            research_questions_answered=thread.research_questions if thread else [],
+            unanswered_questions=unanswered,
+            data_gaps=data_gaps,
+            source_count=source_count,
+            recent_source_count=recent_count,
+            confidence=confidence,
+            evidence_ids=base_evidence_ids,
+        )
 
     def _parse_group_response(
         self,
@@ -512,7 +774,10 @@ class VerticalAnalystAgent(Agent):
                 continue
 
             # Check for special sections
-            if section.startswith("Cross-Vertical Insights") or section.startswith("cross-vertical"):
+            # Prompt uses "Cross-Vertical Observations", so match both variations
+            if (section.startswith("Cross-Vertical Observations") or
+                section.startswith("Cross-Vertical Insights") or
+                section.lower().startswith("cross-vertical")):
                 cross_vertical_section = section
                 continue
             if section.startswith("Web Searches Performed") or section.startswith("web searches"):
@@ -549,13 +814,33 @@ class VerticalAnalystAgent(Agent):
             if conf_match:
                 confidence = float(conf_match.group(1)) / 10
 
-            # Store full prose - that's all we need
+            # Extract facts from prose
+            thread_id = thread.thread_id if thread else ""
+            facts = self._extract_facts_from_prose(
+                section,
+                thread_id,
+                list(base_evidence_ids),
+            )
+
+            # Create dossier
+            dossier = self._create_dossier(
+                thread=thread,
+                vertical_name=v_name,
+                section=section,
+                facts=facts,
+                confidence=confidence,
+                base_evidence_ids=list(base_evidence_ids),
+            )
+
+            # Store full prose with structured facts and dossier
             vertical_analysis = VerticalAnalysis(
-                thread_id=thread.thread_id if thread else "",
+                thread_id=thread_id,
                 vertical_name=v_name,
                 business_understanding=section,  # Full prose for synthesizer
                 evidence_ids=list(base_evidence_ids),
                 overall_confidence=confidence,
+                facts=facts,
+                dossier=dossier,
             )
             vertical_analyses.append(vertical_analysis)
 
@@ -586,6 +871,21 @@ class VerticalAnalystAgent(Agent):
             # Store full content as single analysis
             if threads:
                 thread = threads[0]
+                # Extract facts from full content
+                facts = self._extract_facts_from_prose(
+                    content,
+                    thread.thread_id,
+                    list(base_evidence_ids),
+                )
+                # Create dossier
+                dossier = self._create_dossier(
+                    thread=thread,
+                    vertical_name=thread.name,
+                    section=content,
+                    facts=facts,
+                    confidence=0.5,
+                    base_evidence_ids=list(base_evidence_ids),
+                )
                 vertical_analyses.append(
                     VerticalAnalysis(
                         thread_id=thread.thread_id,
@@ -593,6 +893,8 @@ class VerticalAnalystAgent(Agent):
                         business_understanding=content,  # Full prose
                         evidence_ids=list(base_evidence_ids),
                         overall_confidence=0.5,
+                        facts=facts,
+                        dossier=dossier,
                     )
                 )
 

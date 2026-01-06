@@ -160,3 +160,10 @@ credentials.json
 secrets.json
 *.pem
 *.key
+
+# Test outputs
+test_output/
+test_output_*/
+
+# Refactor experiments
+equity-research-refactor/

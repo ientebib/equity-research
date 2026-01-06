@@ -115,11 +115,26 @@ class DataOrchestratorAgent(Agent):
             )
             company_context.transcripts = manual_transcripts
 
-        # Also fetch real-time market data from yfinance for current price
+        # Fetch real-time market data from yfinance
         try:
             price_client = await self._get_price_client()
             quote = await price_client.get_quote(run_state.ticker)
-            # Add current market data to context
+
+            # Store in dedicated market_data field
+            company_context.market_data = {
+                "price": quote.get("price"),
+                "market_cap": quote.get("market_cap"),
+                "pe_ratio": quote.get("pe_ratio"),
+                "beta": quote.get("beta"),
+                "volume": quote.get("volume"),
+                "avg_volume": quote.get("avg_volume"),
+                "fifty_two_week_high": quote.get("fifty_two_week_high"),
+                "fifty_two_week_low": quote.get("fifty_two_week_low"),
+                "forward_pe": quote.get("forward_pe"),
+                "dividend_yield": quote.get("dividend_yield"),
+            }
+
+            # Also add to profile for backward compatibility
             if company_context.profile:
                 company_context.profile["current_price"] = quote.get("price")
                 company_context.profile["current_market_cap"] = quote.get("market_cap")

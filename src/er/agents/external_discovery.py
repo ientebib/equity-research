@@ -4,44 +4,41 @@ External Discovery Agent (Stage 2B).
 Finds competitive intelligence, news, and market context using web search.
 Focuses on Pillar 2: What's happening OUTSIDE the company.
 
-Model: Claude 4.5 Sonnet (with web search via tool)
+Architecture: Evidence-First approach
+1. Build deterministic query plan
+2. Execute searches via WebResearchService (returns EvidenceCards, not full pages)
+3. Feed EvidenceCards to LLM for analysis (no web_search tool in LLM call)
+
+This avoids token explosion from full page content in LLM context.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
-from er.llm.anthropic_client import AnthropicClient
-from er.llm.base import LLMRequest
+from er.llm.router import AgentRole
 from er.types import (
     CompanyContext,
     DiscoveredThread,
     Phase,
     RunState,
+    ThreadBrief,
     ThreadType,
     generate_id,
 )
 
 
-# External Discovery prompt - focused on competitive/news/market context
+# External Discovery prompt - now receives pre-fetched EvidenceCards
 EXTERNAL_DISCOVERY_PROMPT = """You are the External Discovery Agent for an institutional equity research system.
 
-## ⚠️ CRITICAL: DATE AWARENESS ⚠️
+## ⚠️ DATE AWARENESS ⚠️
 
 **TODAY IS: {date}**
 **CURRENT MONTH: {current_month} {current_year}**
-**TODAY IS: {date}**
-
-Your training data is STALE and OUTDATED. You are analyzing a company in REAL-TIME.
-
-**DO NOT USE YOUR TRAINING DATA FOR FACTS.**
-**EVERYTHING MUST COME FROM WEB SEARCHES.**
-
-If you cannot find something via web search, say "Not found via search" - do NOT fill in from memory.
 
 ---
 
@@ -52,195 +49,36 @@ INDUSTRY: {industry}
 
 ---
 
-## ⚠️ REPEAT: DATE GROUNDING ⚠️
-
-Today is **{date}**. This is **{current_month} {current_year}**.
-
-- "Recent" means the last 90 days (since {ninety_days_ago})
-- News from 2024 is OLD (over a year ago)
-- News from early 2025 is STALE (6+ months old)
-- Only {current_month} {current_year} and {last_month} {current_year} are truly "recent"
-
-When you search, include "{current_month} {current_year}" or "December 2025" in your queries.
-
----
-
 ## YOUR MISSION
 
-Your job is to find everything happening OUTSIDE this company that affects its investment thesis:
+Analyze the pre-fetched web research below to find everything happening OUTSIDE this company that affects its investment thesis:
 - What competitors announced recently
 - What the market discourse is about
 - What analysts are debating
 - What regulatory/industry changes matter
 - What the "variant perception" opportunities are
 
-You work alongside an Internal Discovery agent who analyzes company financials and management statements.
+You work alongside an Internal Discovery agent who analyzes company financials.
 Your focus is EXTERNAL context only.
 
 ## KNOWN COMPETITORS
 
-Based on the company profile, likely competitors include:
 {competitors}
 
-## MANDATORY DISCOVERY PROCESS
-
-Complete ALL 5 lenses below. Each lens requires web searches.
-
 ---
 
-## LENS 1: Competitor Developments (Last 90 Days)
+## PRE-FETCHED WEB RESEARCH
 
-**Purpose:** What have competitors done that affects {ticker}?
+The following EvidenceCards summarize web pages that were fetched for you.
+Each card has an Evidence ID for citation tracking.
 
-**REQUIRED SEARCHES (for each major competitor):**
-- "[competitor] announcement {current_month} {current_year}"
-- "[competitor] product launch 2025"
-- "[competitor] earnings {current_year}"
-
-**Task:**
-- What did each major competitor announce?
-- Any product launches that threaten {ticker}?
-- Any strategic shifts?
-- Market share changes?
-
-**Required Output:**
-For each competitor:
-- competitor_name
-- recent_announcement (specific, with date)
-- implication_for_ticker (how does this affect {ticker}?)
-
----
-
-## LENS 2: Industry News & Trends
-
-**Purpose:** What's happening in the industry that affects all players?
-
-**REQUIRED SEARCHES:**
-- "{industry} market news {current_month} {current_year}"
-- "{industry} regulation 2025"
-- "{industry} market size growth 2025"
-- "{sector} trends 2025"
-
-**Task:**
-- Regulatory changes affecting the industry
-- Market growth/contraction signals
-- Technology shifts
-- M&A activity in the space
-
-**Required Output:**
-- headline
-- date
-- affected_companies
-- implication (for {ticker} specifically)
-
----
-
-## LENS 3: Analyst Sentiment & Debates
-
-**Purpose:** What is Wall Street debating about this stock?
-
-**REQUIRED SEARCHES:**
-- "{ticker} analyst upgrade downgrade {current_month} {current_year}"
-- "{ticker} price target 2025"
-- "{ticker} bull case bear case"
-- "{ticker} what is consensus missing"
-
-**Task:**
-- Current consensus view
-- Recent rating changes
-- Key debates between bulls and bears
-- What questions keep coming up?
-
-**Required Output:**
-- consensus_view (bullish/neutral/bearish)
-- recent_rating_changes (list with analyst, date, old→new)
-- bull_thesis (specific, not vague)
-- bear_thesis (specific, not vague)
-- key_debate_topics
-
----
-
-## LENS 4: Market Discourse & Sentiment
-
-**Purpose:** What are people talking about regarding this company?
-
-**REQUIRED SEARCHES:**
-- "{ticker} news {current_month} {current_year}"
-- "{company_name} controversy 2025"
-- "{ticker} reddit sentiment"
-- "{company_name} what people are saying"
-
-**Task:**
-- Major news stories in last 30 days
-- Any controversies or PR issues?
-- Retail investor sentiment
-- Viral discussions or memes
-
-**Required Output:**
-- major_stories (with dates)
-- controversies (if any)
-- sentiment_indicators
-- viral_topics
-
----
-
-## LENS 5: Strategic Shifts & Business Model Changes (LAST 6-12 MONTHS)
-
-**Purpose:** What STRATEGIC changes happened this year? (Not just "recent news" - strategic pivots)
-
-**IMPORTANT:** Strategic shifts may be 2-6 months old but still material if not fully priced in.
-A product launch from October 2025 is STILL relevant in December 2025 if it represents a business model change.
-
-**REQUIRED SEARCHES:**
-- "{company_name} new business model 2025"
-- "{company_name} new revenue stream 2025"
-- "{company_name} selling externally 2025" (internal assets now sold to third parties)
-- "{company_name} strategic pivot 2025"
-- "{ticker} entering new market 2025"
-- "{company_name} competing with new competitors 2025"
-- "{company_name} proprietary technology external customers 2025" (chips, infrastructure, APIs)
-- "{company_name} research breakthrough 2025" (labs, new capabilities)
-- "{company_name} infrastructure as a service 2025"
-
-**Task:**
-- What was INTERNAL-ONLY that is now sold EXTERNALLY? (proprietary tech, APIs, infrastructure, custom hardware)
-- What NEW MARKETS did the company enter this year?
-- What NEW PRODUCTS were launched that change the competitive landscape?
-- What ACQUISITIONS changed the strategy?
-- What R&D or RESEARCH breakthroughs were announced? (new capabilities, patents, benchmarks)
-- Is the company now competing in ADJACENT markets by monetizing internal capabilities?
-
-**These are often 2-6 months old but STILL MATERIAL if not priced in.**
-
----
-
-## LENS 6: Variant Perception Opportunities
-
-**Purpose:** Where might consensus be wrong?
-
-**REQUIRED SEARCHES:**
-- "{ticker} underappreciated"
-- "{ticker} hidden value"
-- "{ticker} what market is missing"
-- "{ticker} undervalued segment"
-
-**Task:**
-- What capabilities does {ticker} have that competitors are valued for?
-- What new business lines are emerging that aren't priced in?
-- Where does your research suggest consensus is wrong?
-
-For each potential variant perception:
-- topic
-- consensus_view (what most people think)
-- variant_view (what might be different)
-- evidence (what supports the variant view)
-- trigger_event (what would prove the variant view right)
+{evidence_cards}
 
 ---
 
 ## OUTPUT FORMAT
 
-Output this JSON structure:
+Based on the evidence cards above, output this JSON structure:
 
 ```json
 {{
@@ -248,19 +86,8 @@ Output this JSON structure:
     "analysis_date": "{date}",
     "ticker": "{ticker}",
     "company_name": "{company_name}",
-    "model": "claude-sonnet",
     "focus": "external_context"
   }},
-
-  "searches_performed": [
-    {{
-      "lens": "competitor_developments",
-      "query": "actual search query used",
-      "sources_found": ["Bloomberg", "Reuters"],
-      "date_range_covered": "2025-10-01 to 2025-12-25",
-      "key_findings": ["finding 1", "finding 2"]
-    }}
-  ],
 
   "competitor_developments": [
     {{
@@ -268,7 +95,7 @@ Output this JSON structure:
       "announcement": "What they announced",
       "date": "YYYY-MM-DD",
       "source": "Bloomberg|Reuters|etc",
-      "source_url": "https://...",
+      "evidence_id": "ev_xxx",
       "implication_for_ticker": "How this affects {ticker}",
       "threat_level": "high|medium|low"
     }}
@@ -279,6 +106,7 @@ Output this JSON structure:
       "headline": "...",
       "date": "YYYY-MM-DD",
       "source": "...",
+      "evidence_id": "ev_xxx",
       "affected_companies": ["{ticker}", "CompetitorA"],
       "implication": "..."
     }}
@@ -292,7 +120,8 @@ Output this JSON structure:
         "analyst": "...",
         "date": "YYYY-MM-DD",
         "action": "upgrade|downgrade|initiate",
-        "from_to": "Hold → Buy"
+        "from_to": "Hold → Buy",
+        "evidence_id": "ev_xxx"
       }}
     ],
     "bull_thesis": "Specific bull case",
@@ -305,7 +134,8 @@ Output this JSON structure:
       {{
         "headline": "...",
         "date": "YYYY-MM-DD",
-        "sentiment": "positive|negative|neutral"
+        "sentiment": "positive|negative|neutral",
+        "evidence_id": "ev_xxx"
       }}
     ],
     "controversies": ["if any"],
@@ -319,7 +149,7 @@ Output this JSON structure:
       "description": "Description of the strategic shift",
       "date_announced": "YYYY-MM-DD",
       "source": "Bloomberg|Reuters|Official PR",
-      "source_url": "https://...",
+      "evidence_id": "ev_xxx",
       "competitive_implication": "How this changes competitive dynamics",
       "is_priced_in": "yes|no|partially",
       "materiality": "high|medium|low"
@@ -332,6 +162,7 @@ Output this JSON structure:
       "consensus_view": "What most investors/analysts believe",
       "variant_view": "Alternative view supported by evidence",
       "evidence": "Specific evidence supporting the variant view",
+      "evidence_ids": ["ev_xxx", "ev_yyy"],
       "trigger_event": "What would prove the variant view correct",
       "confidence": "medium"
     }}
@@ -343,6 +174,7 @@ Output this JSON structure:
       "source_lens": "which lens found this",
       "why_it_matters": "Why this deserves its own research thread",
       "research_questions": ["Question 1", "Question 2"],
+      "evidence_ids": ["ev_xxx"],
       "priority": 1
     }}
   ],
@@ -354,67 +186,21 @@ Output this JSON structure:
 }}
 ```
 
-## HARD RULES
+## RULES
 
-1. **SEARCH EXTENSIVELY** - You must execute real web searches. List all searches in searches_performed.
+1. **CITE EVIDENCE IDs** - Every finding must reference an evidence_id from the cards above.
 
-2. **CITE SOURCES** - Every finding needs a source and date. No training data claims.
+2. **FOCUS ON EXTERNAL** - You are NOT analyzing the company's financials.
 
-3. **FOCUS ON EXTERNAL** - You are NOT analyzing the company's financials. That's the Internal agent's job.
+3. **BE SPECIFIC** - Not "competitors are doing well" but "Microsoft announced X on DATE"
 
-4. **BE SPECIFIC** - Not "competitors are doing well" but "Microsoft announced X on DATE"
+4. **VARIANT PERCEPTION IS KEY** - The most valuable output is variant_perceptions.
 
-5. **VARIANT PERCEPTION IS KEY** - The most valuable output is variant_perceptions. Where is consensus wrong?
-
-6. **SUGGEST THREADS** - If you find something that deserves deep research, add it to research_threads_suggested.
-
-7. **RECENT = VALUABLE** - Prioritize information from the last 90 days.
+5. **ONLY USE PROVIDED EVIDENCE** - Do not make claims not supported by the evidence cards.
 
 ---
 
-## ⚠️ SOURCE QUALITY REQUIREMENTS ⚠️
-
-**ONLY USE REPUTABLE SOURCES.** Ignore SEO spam, content farms, and low-quality sites.
-
-**TIER 1 - Highest Credibility (PREFER THESE):**
-- **Financial News**: Bloomberg, Reuters, Financial Times, Wall Street Journal, CNBC, Yahoo Finance
-- **Tech News**: The Verge, Ars Technica, TechCrunch, Wired, The Information
-- **AI/ML News**: VentureBeat AI, MIT Technology Review
-- **Company Sources**: Official press releases, investor relations pages, SEC filings
-- **Analyst Reports**: Morgan Stanley, Goldman Sachs, JP Morgan, Bank of America (when publicly cited)
-
-**TIER 2 - Acceptable:**
-- **Business News**: Business Insider, Fortune, Forbes (news articles, not contributor posts)
-- **Market Data**: Seeking Alpha (for news, not opinions), MarketWatch
-- **Industry Publications**: Semiconductor Engineering, Cloud Computing News
-
-**TIER 3 - Use With Caution (cite as "unverified"):**
-- Reddit (for sentiment only, not facts)
-- Twitter/X (for announcements from official company accounts only)
-- YouTube (official company channels only)
-
-**NEVER USE:**
-- Random blogs, Medium posts from unknown authors
-- SEO content farms, affiliate marketing sites
-- Sites with excessive ads or clickbait headlines
-- "Expert" roundups from unknown publications
-- Press release aggregators without editorial review
-
-**If you cannot find information from Tier 1-2 sources, state "Not found in reputable sources" rather than citing low-quality sources.**
-
----
-
-## ⚠️ FINAL REMINDER: DATE AWARENESS ⚠️
-
-Today is **{date}**. You are providing analysis as of **{current_month} {current_year}**.
-
-**EVERY claim must have a source and date from your web searches.**
-**If you cannot cite a web search result, do NOT include the claim.**
-**Training data = STALE. Web search = FRESH.**
-
----
-
-Output ONLY the JSON. No preamble, no explanation, no markdown formatting outside the JSON."""
+Output ONLY the JSON. No preamble, no explanation."""
 
 
 @dataclass
@@ -450,7 +236,12 @@ class ExternalDiscoveryAgent(Agent):
     4. Identifying market discourse and viral topics
     5. Surfacing variant perception opportunities
 
-    Uses Claude Sonnet with web search for external context gathering.
+    Architecture: Evidence-First approach
+    1. Build deterministic query plan
+    2. Execute searches via WebResearchService (returns EvidenceCards, not full pages)
+    3. Feed EvidenceCards to LLM for analysis (no web_search tool in LLM call)
+
+    This avoids token explosion from full page content in LLM context.
     """
 
     def __init__(self, context: AgentContext) -> None:
@@ -460,7 +251,7 @@ class ExternalDiscoveryAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
-        self._anthropic_client: AnthropicClient | None = None
+        self._web_research_service = None
 
     @property
     def name(self) -> str:
@@ -470,13 +261,16 @@ class ExternalDiscoveryAgent(Agent):
     def role(self) -> str:
         return "Find competitive intelligence, news, and market context"
 
-    async def _get_anthropic_client(self) -> AnthropicClient:
-        """Get or create Anthropic client."""
-        if self._anthropic_client is None:
-            self._anthropic_client = AnthropicClient(
-                api_key=self.settings.ANTHROPIC_API_KEY,
+    async def _get_web_research_service(self):
+        """Get or create WebResearchService."""
+        if self._web_research_service is None:
+            from er.retrieval.service import WebResearchService
+            self._web_research_service = WebResearchService(
+                llm_router=self.llm_router,
+                evidence_store=self.evidence_store,
+                workspace_store=self.workspace_store,
             )
-        return self._anthropic_client
+        return self._web_research_service
 
     def _get_competitors(self, company_context: CompanyContext) -> list[str]:
         """Extract likely competitors from company context.
@@ -509,13 +303,72 @@ class ExternalDiscoveryAgent(Agent):
 
         return competitors[:5]  # Limit to 5 competitors
 
+    def _build_query_plan(
+        self,
+        company_context: CompanyContext,
+        competitors: list[str],
+    ) -> list[str]:
+        """Build deterministic search query plan.
+
+        Returns a list of search queries covering all lenses:
+        - Competitor developments
+        - Industry news (last 90 days)
+        - Analyst upgrades/downgrades
+        - Product launches
+        - Regulatory changes
+        """
+        ticker = company_context.symbol
+        company_name = company_context.company_name
+        industry = company_context.profile.get("industry", "Technology")
+        sector = company_context.profile.get("sector", "Technology")
+
+        now = datetime.now(timezone.utc)
+        current_month = now.strftime("%B")
+        current_year = now.strftime("%Y")
+
+        queries = []
+
+        # Lens 1: Competitor developments
+        for competitor in competitors[:3]:  # Top 3 competitors
+            queries.append(f"{competitor} announcement {current_month} {current_year}")
+            queries.append(f"{competitor} earnings {current_year}")
+
+        # Lens 2: Industry news
+        queries.append(f"{industry} market news {current_month} {current_year}")
+        queries.append(f"{industry} regulation {current_year}")
+        queries.append(f"{sector} trends {current_year}")
+
+        # Lens 3: Analyst sentiment
+        queries.append(f"{ticker} analyst upgrade downgrade {current_month} {current_year}")
+        queries.append(f"{ticker} price target {current_year}")
+        queries.append(f"{ticker} bull case bear case")
+
+        # Lens 4: Market discourse
+        queries.append(f"{ticker} news {current_month} {current_year}")
+        queries.append(f"{company_name} controversy {current_year}")
+
+        # Lens 5: Strategic shifts
+        queries.append(f"{company_name} new business model {current_year}")
+        queries.append(f"{company_name} strategic pivot {current_year}")
+        queries.append(f"{ticker} entering new market {current_year}")
+
+        # Lens 6: Variant perceptions
+        queries.append(f"{ticker} underappreciated hidden value")
+        queries.append(f"{ticker} what market is missing")
+
+        return queries[:25]  # Max 25 queries
+
     async def run(
         self,
         run_state: RunState,
         company_context: CompanyContext,
         **kwargs: Any,
     ) -> ExternalDiscoveryOutput:
-        """Execute External Discovery.
+        """Execute External Discovery using Evidence-First approach.
+
+        1. Build deterministic query plan
+        2. Execute searches via WebResearchService (fetches URLs, creates EvidenceCards)
+        3. Feed EvidenceCards to LLM for analysis (no web_search tool)
 
         Args:
             run_state: Current run state.
@@ -525,7 +378,7 @@ class ExternalDiscoveryAgent(Agent):
             ExternalDiscoveryOutput with competitive intelligence and market context.
         """
         self.log_info(
-            "Starting external discovery",
+            "Starting external discovery (evidence-first)",
             ticker=run_state.ticker,
         )
 
@@ -533,64 +386,100 @@ class ExternalDiscoveryAgent(Agent):
         competitors = self._get_competitors(company_context)
         competitors_str = "\n".join(f"- {c}" for c in competitors)
 
-        # Build prompt with extensive date grounding
+        # Build query plan
+        queries = self._build_query_plan(company_context, competitors)
+        self.log_info(
+            "Built query plan",
+            ticker=run_state.ticker,
+            query_count=len(queries),
+        )
+
+        # Execute searches via WebResearchService
+        web_service = await self._get_web_research_service()
+        research_results = await web_service.research_batch(
+            queries=queries,
+            max_results_per_query=3,
+            recency_days=90,
+            max_total_queries=25,
+        )
+
+        # Collect all evidence cards
+        all_cards = []
+        all_evidence_ids = list(company_context.evidence_ids)
+        searches_performed = []
+
+        for result in research_results:
+            all_cards.extend(result.evidence_cards)
+            all_evidence_ids.extend(result.evidence_ids)
+            searches_performed.append({
+                "query": result.query,
+                "urls_found": [r.url for r in result.search_results],
+                "cards_generated": len(result.evidence_cards),
+            })
+
+        # Deduplicate evidence IDs
+        all_evidence_ids = list(set(all_evidence_ids))
+
+        self.log_info(
+            "Web research complete",
+            ticker=run_state.ticker,
+            total_cards=len(all_cards),
+            total_evidence_ids=len(all_evidence_ids),
+        )
+
+        # Format evidence cards for prompt
+        evidence_cards_str = self._format_evidence_cards(all_cards)
+
+        # Build prompt with pre-fetched evidence
         now = datetime.now(timezone.utc)
         today = now.strftime("%Y-%m-%d")
         current_month = now.strftime("%B")
         current_year = now.strftime("%Y")
 
-        # Calculate 90 days ago and last month
-        from datetime import timedelta
-        ninety_days_ago = (now - timedelta(days=90)).strftime("%Y-%m-%d")
-
-        # Get last month name
-        last_month_date = now.replace(day=1) - timedelta(days=1)
-        last_month = last_month_date.strftime("%B")
-
         prompt = EXTERNAL_DISCOVERY_PROMPT.format(
             date=today,
             current_month=current_month,
             current_year=current_year,
-            ninety_days_ago=ninety_days_ago,
-            last_month=last_month,
             ticker=company_context.symbol,
             company_name=company_context.company_name,
             sector=company_context.profile.get("sector", "Technology"),
             industry=company_context.profile.get("industry", "Technology"),
             competitors=competitors_str,
+            evidence_cards=evidence_cards_str,
         )
 
-        # Get Anthropic client
-        anthropic = await self._get_anthropic_client()
-
-        # Build request
-        request = LLMRequest(
+        # Call LLM WITHOUT web_search tool - just analyze the evidence cards
+        response = await self.llm_router.call(
+            role=AgentRole.SYNTHESIS,  # Use strong model for analysis
             messages=[{"role": "user", "content": prompt}],
-            model="claude-sonnet-4-20250514",
-            temperature=0.3,
-            max_tokens=16000,
+            max_tokens=8000,
+            response_format={"type": "json_object"},
         )
-
-        # Run with web search enabled
-        self.log_info("Using Claude Sonnet with web search", ticker=run_state.ticker)
-        response = await anthropic.complete_with_web_search(request)
-
-        # Record cost
-        if self.budget_tracker:
-            self.budget_tracker.record_usage(
-                provider="anthropic",
-                model=response.model,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                agent=self.name,
-                phase="external_discovery",
-            )
 
         # Parse response
         output = self._parse_response(
-            response.content,
-            company_context.evidence_ids,
+            response.get("content", ""),
+            tuple(all_evidence_ids),
         )
+
+        # Add searches performed
+        output.searches_performed = searches_performed
+
+        # Generate and store ThreadBriefs
+        thread_briefs = self.generate_thread_briefs(output)
+        if self.workspace_store and thread_briefs:
+            for brief in thread_briefs:
+                self.workspace_store.put_artifact(
+                    artifact_type="thread_brief",
+                    producer=self.name,
+                    json_obj=brief.to_dict(),
+                    summary=f"External ThreadBrief: {brief.rationale[:100]}...",
+                    evidence_ids=brief.key_evidence_ids,
+                )
+            self.log_info(
+                "Stored external thread briefs",
+                count=len(thread_briefs),
+            )
 
         self.log_info(
             "Completed external discovery",
@@ -598,9 +487,33 @@ class ExternalDiscoveryAgent(Agent):
             competitor_developments=len(output.competitor_developments),
             variant_perceptions=len(output.variant_perceptions),
             suggested_threads=len(output.suggested_threads),
+            thread_briefs=len(thread_briefs),
+            evidence_ids=len(output.evidence_ids),
         )
 
         return output
+
+    def _format_evidence_cards(self, cards) -> str:
+        """Format evidence cards for LLM prompt."""
+        if not cards:
+            return "(No web research results available)"
+
+        parts = []
+        for i, card in enumerate(cards, 1):
+            parts.append(f"""
+### Evidence Card {i}
+- **Evidence ID**: {card.raw_evidence_id}
+- **Source**: {card.source}
+- **Title**: {card.title}
+- **URL**: {card.url}
+- **Relevance**: {card.relevance_score:.0%}
+
+**Summary**: {card.summary}
+
+**Key Facts**:
+{chr(10).join(f"  - {f}" for f in card.key_facts) if card.key_facts else "  (none)"}
+""")
+        return "\n".join(parts)
 
     def _parse_response(
         self,
@@ -697,8 +610,110 @@ class ExternalDiscoveryAgent(Agent):
 
         return threads
 
+    def generate_thread_briefs(self, output: ExternalDiscoveryOutput) -> list[ThreadBrief]:
+        """Generate ThreadBriefs from external discovery output.
+
+        Creates briefs for:
+        - Variant perceptions (highest value - where consensus may be wrong)
+        - Strategic shifts (material business model changes)
+        - Suggested research threads
+
+        Args:
+            output: ExternalDiscoveryOutput from run().
+
+        Returns:
+            List of ThreadBrief objects for downstream stages.
+        """
+        briefs = []
+
+        # Generate briefs for variant perceptions (HIGHEST VALUE)
+        for vp in output.variant_perceptions:
+            topic = vp.get("topic", "Unknown")
+            thread_id = generate_id("ext_vp")
+
+            brief = ThreadBrief(
+                thread_id=thread_id,
+                rationale=f"Variant perception identified: consensus may be wrong on {topic}. "
+                         f"Consensus: {vp.get('consensus_view', '')}. "
+                         f"Variant: {vp.get('variant_view', '')}",
+                hypotheses=[
+                    f"If consensus is wrong: {vp.get('variant_view', '')}",
+                    f"Trigger event: {vp.get('trigger_event', '')}",
+                ],
+                key_questions=[
+                    f"Is consensus correct: {vp.get('consensus_view', '')}?",
+                    f"What evidence supports: {vp.get('variant_view', '')}?",
+                    f"When could re-rating occur: {vp.get('trigger_event', '')}?",
+                ],
+                required_evidence=[
+                    "Cross-reference multiple external sources",
+                    "Analyst reports with dissenting views",
+                    vp.get("evidence", ""),
+                ],
+                key_evidence_ids=vp.get("evidence_ids", []) or list(output.evidence_ids[:5]),
+                confidence=0.7 if vp.get("confidence") == "high" else 0.5,
+            )
+            briefs.append(brief)
+
+        # Generate briefs for strategic shifts
+        for shift in output.strategic_shifts:
+            if shift.get("materiality") not in ["high", "medium"]:
+                continue
+
+            thread_id = generate_id("ext_shift")
+            shift_type = shift.get("shift_type", "unknown")
+            description = shift.get("description", "Strategic shift")
+
+            brief = ThreadBrief(
+                thread_id=thread_id,
+                rationale=f"Strategic shift ({shift_type}): {description}. "
+                         f"Competitive implication: {shift.get('competitive_implication', '')}",
+                hypotheses=[
+                    f"If shift succeeds: new competitive advantage in {shift_type}",
+                    f"If shift fails: resource misallocation risk",
+                    f"Priced in: {shift.get('is_priced_in', 'unknown')}",
+                ],
+                key_questions=[
+                    f"What is the revenue/margin impact of: {description}?",
+                    f"Is this priced in? Current assessment: {shift.get('is_priced_in', 'unknown')}",
+                    "How does this change competitive position?",
+                ],
+                required_evidence=[
+                    "Company announcements and press releases",
+                    "Competitor response analysis",
+                    "Market sizing for new opportunity",
+                ],
+                key_evidence_ids=[shift.get("evidence_id")] if shift.get("evidence_id") else list(output.evidence_ids[:3]),
+                confidence=0.8 if shift.get("materiality") == "high" else 0.6,
+            )
+            briefs.append(brief)
+
+        # Generate briefs for suggested threads
+        for st in output.suggested_threads:
+            thread_id = generate_id("ext_thread")
+            name = st.get("name", "Unknown")
+
+            brief = ThreadBrief(
+                thread_id=thread_id,
+                rationale=f"External research suggests: {name}. {st.get('why_it_matters', '')}",
+                hypotheses=[
+                    f"This vertical may be undervalued: {st.get('why_it_matters', '')}",
+                ],
+                key_questions=st.get("research_questions", ["What is the value driver here?"]),
+                required_evidence=[
+                    f"Source lens: {st.get('source_lens', 'external')}",
+                    "Competitor comparisons",
+                    "Market data",
+                ],
+                key_evidence_ids=st.get("evidence_ids", []) or list(output.evidence_ids[:3]),
+                confidence=max(0.3, 1.0 - (st.get("priority", 3) - 1) * 0.15),
+            )
+            briefs.append(brief)
+
+        return briefs
+
     async def close(self) -> None:
         """Close any open clients."""
-        if self._anthropic_client:
-            await self._anthropic_client.close()
-            self._anthropic_client = None
+        if self._web_research_service:
+            await self._web_research_service.close()
+            self._web_research_service = None

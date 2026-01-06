@@ -22,6 +22,7 @@ from er.types import (
     DiscoveryOutput,
     ResearchGroup,
     RunState,
+    ThreadBrief,
     ThreadType,
     generate_id,
 )
@@ -260,6 +261,28 @@ class DiscoveryMerger(Agent):
         # Merge evidence IDs
         merged_evidence = list(internal.evidence_ids) + list(external.evidence_ids)
 
+        # Merge ThreadBriefs from internal discovery
+        merged_thread_briefs: list[ThreadBrief] = list(internal.thread_briefs)
+
+        # Generate ThreadBriefs for externally-added threads
+        for thread in merged_threads:
+            # Skip if already has a brief (internal threads)
+            if any(b.thread_id == thread.thread_id for b in merged_thread_briefs):
+                continue
+
+            # Generate brief for externally-sourced threads
+            if "[VP]" in thread.name or "[SHIFT]" in thread.name or "[EXT]" in thread.name:
+                brief = ThreadBrief(
+                    thread_id=thread.thread_id,
+                    rationale=thread.description,
+                    hypotheses=[thread.value_driver_hypothesis] if thread.value_driver_hypothesis else [],
+                    key_questions=thread.research_questions,
+                    required_evidence=["External market research", "Competitor analysis"],
+                    key_evidence_ids=list(external.evidence_ids[:5]),
+                    confidence=0.6 if "[VP]" in thread.name else 0.5,
+                )
+                merged_thread_briefs.append(brief)
+
         # Create merged output
         merged_output = DiscoveryOutput(
             official_segments=internal.official_segments,
@@ -270,13 +293,28 @@ class DiscoveryMerger(Agent):
             data_gaps=merged_gaps,
             conflicting_signals=merged_conflicts,
             evidence_ids=merged_evidence,
+            thread_briefs=merged_thread_briefs,
         )
+
+        # Store merged ThreadBriefs in WorkspaceStore
+        if self.workspace_store:
+            # Store only the newly created briefs (externally-added threads)
+            for brief in merged_thread_briefs:
+                if brief not in internal.thread_briefs:
+                    self.workspace_store.put_artifact(
+                        artifact_type="thread_brief",
+                        producer=self.name,
+                        json_obj=brief.to_dict(),
+                        summary=f"Merged ThreadBrief: {brief.rationale[:100]}...",
+                        evidence_ids=brief.key_evidence_ids,
+                    )
 
         self.log_info(
             "Merge complete",
             ticker=run_state.ticker,
             total_threads=len(merged_threads),
             total_groups=len(merged_groups),
+            thread_briefs=len(merged_thread_briefs),
             variant_perceptions_added=len([t for t in merged_threads if "[VP]" in t.name]),
         )
 

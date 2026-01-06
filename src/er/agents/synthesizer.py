@@ -21,11 +21,16 @@ from er.llm.base import LLMRequest
 from er.llm.openai_client import OpenAIClient
 from er.types import (
     CompanyContext,
+    CrossVerticalMap,
     DiscoveryOutput,
     EditorialFeedback,
+    Fact,
     Phase,
     RunState,
     SynthesisOutput,
+    VerifiedFact,
+    VerifiedResearchPackage,
+    VerificationStatus,
     VerticalAnalysis,
 )
 
@@ -164,15 +169,25 @@ THEN, at the very end, include a JSON block with structured metadata:
 }}
 ```
 
+## VERIFIED FACTS (pre-verified against ground truth)
+
+{verified_facts_section}
+
+## CROSS-VERTICAL MAP (dependencies and shared risks)
+
+{cross_vertical_section}
+
 ## HARD RULES
 
 1. **PRESERVE NUANCE** - Do not compress the Deep Research analyses. Your report should be 15-20K tokens, not 3K.
 2. **CROSS-REFERENCE** - Your unique value is seeing connections between verticals. Add these insights.
 3. **NO NEW RESEARCH** - Synthesize what the analysts provided. Don't invent new facts.
-4. **CITE SOURCES** - When referencing specific data points, note which analyst report it came from.
+4. **CITE EVIDENCE IDs** - When making a factual claim, cite the evidence ID in brackets: [ev_xxxx]. Every major claim needs a citation.
 5. **SCENARIOS SUM TO 1.0** - Bull + Base + Bear probabilities must total ~100%.
 6. **NO DCF** - This is qualitative analysis only for V1.
 7. **BE SPECIFIC** - Not "growth could slow" but "if Cloud growth drops below 20% YoY".
+8. **USE VERIFIED FACTS** - Prioritize facts marked as VERIFIED. Note facts marked CONTRADICTED.
+9. **ACKNOWLEDGE UNCERTAINTY** - If a claim is UNVERIFIABLE, say so in the report.
 """
 
 
@@ -284,6 +299,8 @@ class SynthesizerAgent(Agent):
         company_context: CompanyContext,
         discovery_output: DiscoveryOutput,
         vertical_analyses: list[VerticalAnalysis],
+        verified_package: VerifiedResearchPackage | None = None,
+        cross_vertical_map: CrossVerticalMap | None = None,
         **kwargs: Any,
     ) -> tuple[SynthesisOutput, SynthesisOutput]:
         """Execute Stage 4: Dual Synthesis.
@@ -295,6 +312,8 @@ class SynthesizerAgent(Agent):
             company_context: CompanyContext from Stage 1.
             discovery_output: Discovery findings from Stage 2.
             vertical_analyses: All vertical analyses from Stage 3.
+            verified_package: Optional VerifiedResearchPackage from Verifier.
+            cross_vertical_map: Optional CrossVerticalMap from Integrator.
 
         Returns:
             Tuple of (claude_synthesis, gpt_synthesis).
@@ -303,6 +322,8 @@ class SynthesizerAgent(Agent):
             "Starting dual synthesis",
             ticker=run_state.ticker,
             vertical_count=len(vertical_analyses),
+            has_verified_package=verified_package is not None,
+            has_cross_vertical_map=cross_vertical_map is not None,
         )
 
         run_state.phase = Phase.SYNTHESIZE
@@ -313,6 +334,12 @@ class SynthesizerAgent(Agent):
         # Format vertical analyses - these contain full prose from Deep Research
         vertical_str = self._format_vertical_analyses(vertical_analyses)
 
+        # Format verified facts section
+        verified_facts_section = self._format_verified_facts(verified_package)
+
+        # Format cross-vertical map section
+        cross_vertical_section = self._format_cross_vertical_map(cross_vertical_map)
+
         # Note: We don't pass CompanyContext here because Deep Research already
         # incorporated all that data into their analyses. Passing it again would
         # be redundant and waste tokens.
@@ -321,6 +348,8 @@ class SynthesizerAgent(Agent):
             ticker=company_context.symbol,
             company_name=company_context.company_name,
             vertical_analyses=vertical_str,
+            verified_facts_section=verified_facts_section,
+            cross_vertical_section=cross_vertical_section,
         )
 
         # Run both syntheses in parallel, save each as it completes
@@ -435,6 +464,99 @@ class SynthesizerAgent(Agent):
 """)
         return "\n".join(sections)
 
+    def _format_verified_facts(
+        self,
+        package: VerifiedResearchPackage | None,
+    ) -> str:
+        """Format verified facts for the synthesis prompt.
+
+        Groups facts by verification status and includes evidence IDs.
+        """
+        if not package or not package.all_verified_facts:
+            return "(No verified facts available)"
+
+        lines = []
+
+        # Group by status
+        verified = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.VERIFIED]
+        partial = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.PARTIAL]
+        contradicted = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.CONTRADICTED]
+        unverifiable = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.UNVERIFIABLE]
+
+        # Verified facts (highest priority for citations)
+        if verified:
+            lines.append("### VERIFIED FACTS (cite these with confidence)")
+            for vf in verified[:15]:  # Limit to top 15
+                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement} (conf: {vf.adjusted_confidence:.0%})")
+
+        # Partial facts
+        if partial:
+            lines.append("\n### PARTIALLY VERIFIED (use with caution)")
+            for vf in partial[:10]:
+                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+
+        # Contradicted facts (warn about these)
+        if contradicted:
+            lines.append("\n### CONTRADICTED (DO NOT USE - conflicts with ground truth)")
+            for vf in contradicted:
+                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+                lines.append(f"  ** Contradiction: {vf.verification_notes}")
+
+        # Critical issues
+        if package.critical_issues:
+            lines.append("\n### CRITICAL ISSUES TO ADDRESS")
+            for issue in package.critical_issues[:5]:
+                lines.append(f"- {issue}")
+
+        return "\n".join(lines)
+
+    def _format_cross_vertical_map(
+        self,
+        cross_map: CrossVerticalMap | None,
+    ) -> str:
+        """Format cross-vertical map for the synthesis prompt.
+
+        Includes dependencies, shared risks, and key insights.
+        """
+        if not cross_map:
+            return "(No cross-vertical analysis available)"
+
+        lines = []
+
+        # Foundational verticals
+        if cross_map.foundational_verticals:
+            lines.append(f"**Foundational Verticals:** {', '.join(cross_map.foundational_verticals)}")
+            lines.append("(Other verticals depend on these - prioritize in analysis)")
+
+        # Key dependencies
+        if cross_map.key_dependencies:
+            lines.append("\n### KEY DEPENDENCIES")
+            for dep in cross_map.key_dependencies:
+                lines.append(f"- {dep}")
+
+        # Relationships
+        if cross_map.relationships:
+            lines.append("\n### VERTICAL RELATIONSHIPS")
+            for rel in cross_map.relationships[:10]:
+                lines.append(f"- {rel.source_vertical} -> {rel.target_vertical} ({rel.relationship_type.value}, {rel.strength})")
+                lines.append(f"  {rel.description}")
+
+        # Shared risks
+        if cross_map.shared_risks:
+            lines.append("\n### SHARED RISKS (affect multiple verticals)")
+            for sr in cross_map.shared_risks:
+                lines.append(f"- **{sr.risk_description}** ({sr.severity} severity, {sr.probability} probability)")
+                lines.append(f"  Affects: {', '.join(sr.affected_verticals)}")
+
+        # Cross-vertical insights
+        if cross_map.cross_vertical_insights:
+            lines.append("\n### CROSS-VERTICAL INSIGHTS")
+            for cvi in cross_map.cross_vertical_insights:
+                lines.append(f"- {cvi.insight}")
+                lines.append(f"  Implication: {cvi.implication} (conf: {cvi.confidence:.0%})")
+
+        return "\n".join(lines) if lines else "(No cross-vertical patterns identified)"
+
     async def _run_claude_synthesis(
         self,
         prompt: str,
@@ -451,12 +573,13 @@ class SynthesizerAgent(Agent):
                 {"role": "user", "content": prompt},
             ],
             model="claude-opus-4-5-20251101",
-            max_tokens=32000,  # Allow 20K+ output for full research report
+            # Note: max_tokens is computed by complete_with_thinking from budget + expected output
         )
 
         response = await anthropic.complete_with_thinking(
             request,
-            budget_tokens=20000,  # More thinking budget for complex synthesis
+            budget_tokens=15000,  # Thinking budget for complex synthesis
+            expected_output_tokens=25000,  # Full research report needs ~20K words
         )
 
         # Record cost
@@ -630,6 +753,83 @@ class SynthesizerAgent(Agent):
 
         return revised
 
+    async def resynthesis(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        discovery_output: DiscoveryOutput,
+        vertical_analyses: list[VerticalAnalysis],
+        feedback: EditorialFeedback,
+    ) -> SynthesisOutput:
+        """Re-synthesize after Judge rejects both reports.
+
+        When both Claude and GPT syntheses are rejected, we re-run synthesis
+        with the rejection reason as additional guidance.
+
+        Args:
+            run_state: Current run state.
+            company_context: CompanyContext from Stage 1.
+            discovery_output: Discovery findings from Stage 2.
+            vertical_analyses: All vertical analyses from Stage 3.
+            feedback: EditorialFeedback with rejection_reason.
+
+        Returns:
+            New SynthesisOutput from re-synthesis.
+        """
+        self.log_info(
+            "Starting re-synthesis after Judge rejection",
+            ticker=run_state.ticker,
+            rejection_reason=feedback.rejection_reason,
+        )
+
+        # Build the shared prompt with rejection context prepended
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Format vertical analyses - these contain full prose from Deep Research
+        vertical_str = self._format_vertical_analyses(vertical_analyses)
+
+        # Build rejection context
+        rejection_context = f"""
+## CRITICAL: PREVIOUS SYNTHESES REJECTED
+
+The Judge reviewed two previous synthesis attempts and rejected BOTH.
+You must address the following critical issues:
+
+**Rejection Reason:**
+{feedback.rejection_reason or "No specific rejection reason provided."}
+
+**Errors to Fix ({len(feedback.errors_to_fix)}):**
+{self._format_errors_feedback(feedback.errors_to_fix)}
+
+**Gaps to Address ({len(feedback.gaps_to_address)}):**
+{self._format_gaps_feedback(feedback.gaps_to_address)}
+
+**Revision Instructions:**
+{feedback.revision_instructions}
+
+---
+"""
+
+        # Build the full prompt with rejection context
+        prompt = rejection_context + SYNTHESIS_PROMPT.format(
+            date=today,
+            ticker=company_context.symbol,
+            company_name=company_context.company_name,
+            vertical_analyses=vertical_str,
+        )
+
+        # Re-run synthesis with Claude (default)
+        result = await self._run_claude_synthesis(prompt, company_context)
+
+        self.log_info(
+            "Completed re-synthesis",
+            ticker=run_state.ticker,
+            view=result.investment_view,
+            confidence=result.overall_confidence,
+        )
+
+        return result
+
     def _format_incorporate_feedback(self, items: list) -> str:
         """Format insights to incorporate from other synthesis."""
         if not items:
@@ -691,12 +891,13 @@ class SynthesizerAgent(Agent):
                 {"role": "user", "content": prompt},
             ],
             model="claude-opus-4-5-20251101",
-            max_tokens=32000,
+            # Note: max_tokens is computed by complete_with_thinking from budget + expected output
         )
 
         response = await anthropic.complete_with_thinking(
             request,
-            budget_tokens=15000,
+            budget_tokens=12000,  # Less thinking needed for revision
+            expected_output_tokens=25000,  # Revised report still needs full output
         )
 
         if self.budget_tracker:

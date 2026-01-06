@@ -1,0 +1,201 @@
+# Source Catalog Configuration
+# Maps topic tags to preferred domains and defines ToS policies
+
+# Topic-based domain mappings
+topics:
+  tech_analysis:
+    domains:
+      - stratechery.com
+      - semianalysis.com
+      - anandtech.com
+      - arstechnica.com
+      - theverge.com
+    description: "Deep tech analysis and semiconductor coverage"
+
+  cloud_saas:
+    domains:
+      - cloudedjudgement.com
+      - softwarestackinvesting.com
+      - bvp.com
+    description: "Cloud and SaaS industry analysis"
+
+  financial_news:
+    domains:
+      - reuters.com
+      - bloomberg.com
+      - wsj.com
+      - ft.com
+      - cnbc.com
+    description: "Major financial news outlets"
+
+  analyst_research:
+    domains:
+      - seekingalpha.com
+      - morningstar.com
+      - fool.com
+    description: "Analyst and investment research"
+
+  company_official:
+    domains:
+      - investor.apple.com
+      - investor.google.com
+      - investor.microsoft.com
+      - sec.gov
+    description: "Official company investor relations and SEC filings"
+
+  industry_data:
+    domains:
+      - statista.com
+      - idc.com
+      - gartner.com
+      - forrester.com
+    description: "Industry data and market research"
+
+  regulatory:
+    domains:
+      - sec.gov
+      - ftc.gov
+      - justice.gov
+      - ec.europa.eu
+    description: "Regulatory and government sources"
+
+# Domain-specific policies
+domains:
+  # Official sources - highest tier
+  sec.gov:
+    tier: official
+    tos_risk: none
+    allowed_fetch: true
+    reputation_score: 1.0
+
+  # Premium sources - may have paywalls
+  bloomberg.com:
+    tier: institutional
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.95
+    notes: "May hit paywall"
+
+  wsj.com:
+    tier: institutional
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.95
+    notes: "May hit paywall"
+
+  ft.com:
+    tier: institutional
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.95
+    notes: "May hit paywall"
+
+  # News sources
+  reuters.com:
+    tier: news
+    tos_risk: low
+    allowed_fetch: true
+    reputation_score: 0.9
+
+  cnbc.com:
+    tier: news
+    tos_risk: low
+    allowed_fetch: true
+    reputation_score: 0.85
+
+  # Analyst/research sources
+  seekingalpha.com:
+    tier: other
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.7
+    notes: "Crowdsourced analysis, verify claims"
+
+  morningstar.com:
+    tier: institutional
+    tos_risk: low
+    allowed_fetch: true
+    reputation_score: 0.85
+
+  # Tech analysis
+  stratechery.com:
+    tier: institutional
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.9
+    notes: "Premium, may hit paywall"
+
+  semianalysis.com:
+    tier: institutional
+    tos_risk: low
+    allowed_fetch: true
+    reputation_score: 0.85
+
+  # Default for unknown domains
+  _default:
+    tier: other
+    tos_risk: medium
+    allowed_fetch: true
+    reputation_score: 0.5
+
+# Coverage category configurations
+coverage_categories:
+  recent_developments:
+    min_evidence_cards: 3
+    recency_days: 90
+    preferred_topics:
+      - financial_news
+      - tech_analysis
+
+  competitive_moves:
+    min_evidence_cards: 2
+    recency_days: 180
+    preferred_topics:
+      - financial_news
+      - tech_analysis
+      - industry_data
+
+  product_roadmap:
+    min_evidence_cards: 2
+    recency_days: 180
+    preferred_topics:
+      - tech_analysis
+      - company_official
+
+  regulatory_litigation:
+    min_evidence_cards: 2
+    recency_days: 365
+    preferred_topics:
+      - regulatory
+      - financial_news
+
+  capital_allocation:
+    min_evidence_cards: 2
+    recency_days: 180
+    preferred_topics:
+      - financial_news
+      - company_official
+
+  segment_economics:
+    min_evidence_cards: 2
+    recency_days: 365
+    preferred_topics:
+      - analyst_research
+      - company_official
+
+  ai_infrastructure:
+    min_evidence_cards: 2
+    recency_days: 90
+    preferred_topics:
+      - tech_analysis
+      - financial_news
+    applicable_sectors:
+      - Technology
+      - Communication Services
+
+  management_tone:
+    min_evidence_cards: 1
+    recency_days: 180
+    preferred_topics:
+      - company_official
+      - analyst_research

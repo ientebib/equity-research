@@ -23,6 +23,7 @@ from er.budget import BudgetTracker
 from er.evidence.store import EvidenceStore
 from er.llm.router import LLMRouter
 from er.logging import get_logger
+from er.workspace.store import WorkspaceStore
 
 if TYPE_CHECKING:
     from er.config import Settings
@@ -42,6 +43,7 @@ class AgentContext:
     llm_router: LLMRouter
     evidence_store: EvidenceStore
     budget_tracker: BudgetTracker
+    workspace_store: WorkspaceStore | None = None
 
 
 class Agent(ABC):
@@ -104,6 +106,11 @@ class Agent(ABC):
     def budget_tracker(self) -> BudgetTracker:
         """Get budget tracker."""
         return self.context.budget_tracker
+
+    @property
+    def workspace_store(self) -> WorkspaceStore | None:
+        """Get workspace store (may be None if not configured)."""
+        return self.context.workspace_store
 
     def log_info(self, message: str, **kwargs: Any) -> None:
         """Log info message with agent context."""
