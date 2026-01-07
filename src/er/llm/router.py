@@ -41,6 +41,7 @@ class AgentRole(Enum):
     JUDGE = "judge"
     FACTCHECK = "factcheck"
     OUTPUT = "output"
+    WORKHORSE = "workhorse"  # For quick, high-volume tasks (recency, coverage, entailment)
 
 
 class EscalationLevel(Enum):
@@ -94,6 +95,11 @@ DEFAULT_MODEL_MAP: dict[AgentRole, dict[EscalationLevel, tuple[str, str]]] = {
         EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
         EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
         EscalationLevel.CRITICAL: ("claude-sonnet-4-5-20250929", "anthropic"),
+    },
+    AgentRole.WORKHORSE: {
+        EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
+        EscalationLevel.CRITICAL: ("gpt-5.2", "openai"),
     },
 }
 
@@ -151,10 +157,10 @@ class LLMRouter:
         # Override from settings if configured
         s = self._settings
 
-        # Override workhorse model for orchestration/factcheck/output
+        # Override workhorse model for orchestration/factcheck/output/workhorse
         if s.model_workhorse:
             provider = self._infer_provider(s.model_workhorse)
-            for role in [AgentRole.ORCHESTRATION, AgentRole.FACTCHECK, AgentRole.OUTPUT]:
+            for role in [AgentRole.ORCHESTRATION, AgentRole.FACTCHECK, AgentRole.OUTPUT, AgentRole.WORKHORSE]:
                 model_map[role][EscalationLevel.NORMAL] = (s.model_workhorse, provider)
 
         # Override research model
@@ -195,6 +201,42 @@ class LLMRouter:
             # Default to OpenAI
             return "openai"
 
+    def _has_provider_key(self, provider: str) -> bool:
+        """Check if we have an API key for the provider.
+
+        Args:
+            provider: Provider name.
+
+        Returns:
+            True if API key is available.
+        """
+        if provider == "openai":
+            return bool(self._settings.openai_api_key)
+        elif provider == "anthropic":
+            return bool(self._settings.anthropic_api_key)
+        elif provider == "google":
+            return bool(self._settings.gemini_api_key)
+        return False
+
+    def _get_fallback_provider(self, original_provider: str) -> str | None:
+        """Get a fallback provider when the original is unavailable.
+
+        Args:
+            original_provider: The provider that's missing a key.
+
+        Returns:
+            Fallback provider name, or None if no fallback available.
+        """
+        # Fallback priority: OpenAI -> Anthropic -> Google
+        fallback_order = ["openai", "anthropic", "google"]
+        for provider in fallback_order:
+            if provider != original_provider and self._has_provider_key(provider):
+                logger.warning(
+                    f"Provider {original_provider} unavailable, falling back to {provider}"
+                )
+                return provider
+        return None
+
     def _get_client(self, provider: str) -> OpenAIClient | AnthropicClient | GeminiClient:
         """Get or create client for provider.
 
@@ -203,7 +245,21 @@ class LLMRouter:
 
         Returns:
             LLM client instance.
+
+        Raises:
+            ValueError: If provider is unknown or no API key is available.
         """
+        # Check if we have the key for the requested provider
+        if not self._has_provider_key(provider):
+            fallback = self._get_fallback_provider(provider)
+            if fallback:
+                provider = fallback
+            else:
+                raise ValueError(
+                    f"No API key for {provider} and no fallback provider available. "
+                    f"Set one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
+                )
+
         if provider == "openai":
             if self._openai_client is None:
                 self._openai_client = OpenAIClient(api_key=self._settings.openai_api_key)
@@ -278,12 +334,13 @@ class LLMRouter:
         if self._budget_tracker and self._budget_tracker.is_exceeded():
             raise BudgetExceededError("Budget limit exceeded")
 
-        # Get client and model
-        client, model = self.get_client_and_model(role, escalation)
-
-        # Handle dry run mode
+        # Handle dry run mode BEFORE creating clients (avoid API key errors)
         if self._dry_run:
-            return self._get_dry_run_response(role, model, client.provider)
+            model, provider = self._model_map[role][escalation]
+            return self._get_dry_run_response(role, model, provider)
+
+        # Get client and model (this may create clients that need API keys)
+        client, model = self.get_client_and_model(role, escalation)
 
         # Build request
         request = LLMRequest(

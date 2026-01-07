@@ -206,35 +206,75 @@ class WebResearchService:
         max_results_per_query: int = 3,
         recency_days: int | None = None,
         max_total_queries: int = 25,
+        max_concurrency: int = 3,
     ) -> list[WebResearchResult]:
-        """Execute multiple research queries.
+        """Execute multiple research queries with controlled concurrency.
 
         Args:
             queries: List of search queries.
             max_results_per_query: Max results per query.
             recency_days: Only results from last N days.
             max_total_queries: Maximum number of queries to execute.
+            max_concurrency: Maximum concurrent queries (default 3).
 
         Returns:
             List of WebResearchResult objects.
         """
         import asyncio
 
-        # Limit total queries
+        # Limit total queries to budget
         queries = queries[:max_total_queries]
 
-        # Process sequentially to avoid rate limits
-        # (Could parallelize with semaphore if needed)
-        results = []
-        for query in queries:
-            result = await self.research(
-                query=query,
-                max_results=max_results_per_query,
-                recency_days=recency_days,
-            )
-            results.append(result)
+        logger.info(
+            "Starting batch web research",
+            total_queries=len(queries),
+            max_concurrency=max_concurrency,
+            max_results_per_query=max_results_per_query,
+        )
 
-        return results
+        # Use semaphore for rate limit control
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def research_with_semaphore(query: str) -> WebResearchResult:
+            async with semaphore:
+                return await self.research(
+                    query=query,
+                    max_results=max_results_per_query,
+                    recency_days=recency_days,
+                )
+
+        # Execute all queries with controlled concurrency
+        results = await asyncio.gather(
+            *[research_with_semaphore(q) for q in queries],
+            return_exceptions=True,
+        )
+
+        # Convert exceptions to empty results
+        processed: list[WebResearchResult] = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "Batch query failed",
+                    query=queries[i],
+                    error=str(result),
+                )
+                processed.append(WebResearchResult(
+                    query=queries[i],
+                    search_results=[],
+                    fetch_results=[],
+                    evidence_cards=[],
+                    evidence_ids=[],
+                ))
+            else:
+                processed.append(result)
+
+        logger.info(
+            "Batch web research complete",
+            total_queries=len(queries),
+            successful=sum(1 for r in processed if r.search_results),
+        )
+
+        return processed
 
     def get_searches_performed(self) -> list[dict[str, Any]]:
         """Get list of all searches performed this session."""

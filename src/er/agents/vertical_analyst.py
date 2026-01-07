@@ -18,12 +18,14 @@ from er.llm.openai_client import OpenAIClient
 from er.types import (
     CompanyContext,
     DiscoveredThread,
+    DiscoveryOutput,
     Fact,
     FactCategory,
     GroupResearchOutput,
     Phase,
     ResearchGroup,
     RunState,
+    ThreadBrief,
     VerticalAnalysis,
     VerticalDossier,
     generate_id,
@@ -336,6 +338,49 @@ class VerticalAnalystAgent(Agent):
             )
         return self._openai_client
 
+    def _get_thread_evidence_ids(
+        self,
+        thread: DiscoveredThread,
+        discovery_output: DiscoveryOutput | None,
+        company_context: CompanyContext,
+    ) -> list[str]:
+        """Derive evidence IDs for a thread from multiple sources.
+
+        Priority:
+        1. thread.evidence_ids
+        2. ThreadBrief.key_evidence_ids (if discovery_output provided)
+        3. Fallback to company_context.evidence_ids if empty
+
+        Args:
+            thread: The research thread.
+            discovery_output: Discovery output containing thread_briefs.
+            company_context: Company context as fallback.
+
+        Returns:
+            Merged list of evidence IDs for the thread.
+        """
+        evidence_ids: list[str] = []
+
+        # Add thread's own evidence IDs
+        if thread.evidence_ids:
+            evidence_ids.extend(thread.evidence_ids)
+
+        # Add ThreadBrief's key evidence IDs
+        if discovery_output and discovery_output.thread_briefs:
+            for brief in discovery_output.thread_briefs:
+                if brief.thread_id == thread.thread_id:
+                    if brief.key_evidence_ids:
+                        for eid in brief.key_evidence_ids:
+                            if eid not in evidence_ids:
+                                evidence_ids.append(eid)
+                    break
+
+        # Fallback to company_context if still empty
+        if not evidence_ids:
+            evidence_ids = list(company_context.evidence_ids)
+
+        return evidence_ids
+
     async def run_group(
         self,
         run_state: RunState,
@@ -344,6 +389,7 @@ class VerticalAnalystAgent(Agent):
         threads: list[DiscoveredThread],
         use_deep_research: bool = True,
         other_groups: list[tuple[ResearchGroup, list[DiscoveredThread]]] | None = None,
+        discovery_output: DiscoveryOutput | None = None,
         **kwargs: Any,
     ) -> GroupResearchOutput:
         """Execute Stage 3: Deep Research for a research group.
@@ -357,6 +403,7 @@ class VerticalAnalystAgent(Agent):
             other_groups: Other research groups being analyzed in parallel.
                           List of (ResearchGroup, threads) tuples. Used for
                           co-analyst coordination to avoid duplicate work.
+            discovery_output: Discovery output for thread_briefs evidence IDs.
 
         Returns:
             GroupResearchOutput with all vertical analyses.
@@ -475,12 +522,20 @@ class VerticalAnalystAgent(Agent):
                 phase="verticals",
             )
 
-        # Parse the response
+        # Build per-thread evidence ID maps for parsing
+        thread_evidence_map: dict[str, list[str]] = {}
+        for thread in threads:
+            thread_evidence_map[thread.thread_id] = self._get_thread_evidence_ids(
+                thread, discovery_output, company_context
+            )
+
+        # Parse the response with per-thread evidence IDs
         group_output = self._parse_group_response(
             response.content,
             research_group,
             threads,
             company_context.evidence_ids,
+            thread_evidence_map,
         )
 
         # Store VerticalDossiers in WorkspaceStore for downstream stages
@@ -747,6 +802,7 @@ class VerticalAnalystAgent(Agent):
         research_group: ResearchGroup,
         threads: list[DiscoveredThread],
         base_evidence_ids: tuple[str, ...],
+        thread_evidence_map: dict[str, list[str]] | None = None,
     ) -> GroupResearchOutput:
         """Parse the LLM prose response into GroupResearchOutput.
 
@@ -757,7 +813,8 @@ class VerticalAnalystAgent(Agent):
             content: Raw LLM response (markdown prose).
             research_group: The research group.
             threads: Threads in this group.
-            base_evidence_ids: Evidence IDs from CompanyContext.
+            base_evidence_ids: Evidence IDs from CompanyContext (fallback).
+            thread_evidence_map: Per-thread evidence IDs for proper propagation.
 
         Returns:
             Parsed GroupResearchOutput.
@@ -814,12 +871,18 @@ class VerticalAnalystAgent(Agent):
             if conf_match:
                 confidence = float(conf_match.group(1)) / 10
 
-            # Extract facts from prose
+            # Get thread-specific evidence IDs (fallback to base)
             thread_id = thread.thread_id if thread else ""
+            if thread_evidence_map and thread_id and thread_id in thread_evidence_map:
+                vertical_evidence_ids = thread_evidence_map[thread_id]
+            else:
+                vertical_evidence_ids = list(base_evidence_ids)
+
+            # Extract facts from prose with thread-specific evidence
             facts = self._extract_facts_from_prose(
                 section,
                 thread_id,
-                list(base_evidence_ids),
+                vertical_evidence_ids,
             )
 
             # Create dossier
@@ -829,7 +892,7 @@ class VerticalAnalystAgent(Agent):
                 section=section,
                 facts=facts,
                 confidence=confidence,
-                base_evidence_ids=list(base_evidence_ids),
+                base_evidence_ids=vertical_evidence_ids,
             )
 
             # Store full prose with structured facts and dossier
@@ -837,7 +900,7 @@ class VerticalAnalystAgent(Agent):
                 thread_id=thread_id,
                 vertical_name=v_name,
                 business_understanding=section,  # Full prose for synthesizer
-                evidence_ids=list(base_evidence_ids),
+                evidence_ids=vertical_evidence_ids,
                 overall_confidence=confidence,
                 facts=facts,
                 dossier=dossier,
@@ -871,11 +934,16 @@ class VerticalAnalystAgent(Agent):
             # Store full content as single analysis
             if threads:
                 thread = threads[0]
+                # Get thread-specific evidence IDs
+                if thread_evidence_map and thread.thread_id in thread_evidence_map:
+                    fallback_evidence_ids = thread_evidence_map[thread.thread_id]
+                else:
+                    fallback_evidence_ids = list(base_evidence_ids)
                 # Extract facts from full content
                 facts = self._extract_facts_from_prose(
                     content,
                     thread.thread_id,
-                    list(base_evidence_ids),
+                    fallback_evidence_ids,
                 )
                 # Create dossier
                 dossier = self._create_dossier(
@@ -884,14 +952,14 @@ class VerticalAnalystAgent(Agent):
                     section=content,
                     facts=facts,
                     confidence=0.5,
-                    base_evidence_ids=list(base_evidence_ids),
+                    base_evidence_ids=fallback_evidence_ids,
                 )
                 vertical_analyses.append(
                     VerticalAnalysis(
                         thread_id=thread.thread_id,
                         vertical_name=thread.name,
                         business_understanding=content,  # Full prose
-                        evidence_ids=list(base_evidence_ids),
+                        evidence_ids=fallback_evidence_ids,
                         overall_confidence=0.5,
                         facts=facts,
                         dossier=dossier,

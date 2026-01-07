@@ -186,12 +186,21 @@ class WebFetcher:
             existing = await self.evidence_store.find_by_url(url)
             if existing:
                 logger.debug("Using cached evidence", url=url, evidence_id=existing.evidence_id)
-                # Need to retrieve the text - for now, return minimal result
+                # Retrieve the full content and re-extract text
+                cached_content = await self.evidence_store.get_blob(existing.evidence_id)
+                if cached_content and existing.content_type == "text/html":
+                    # Re-extract full text from cached HTML
+                    html = cached_content.decode("utf-8", errors="replace")
+                    title, text = self._extract_text(html)
+                else:
+                    # Fallback to snippet if content not available
+                    title = existing.title or ""
+                    text = existing.snippet or ""
                 return FetchResult(
                     url=url,
                     evidence_id=existing.evidence_id,
-                    title=existing.title or "",
-                    text=existing.snippet or "",  # Use snippet as fallback
+                    title=title,
+                    text=text,
                     content_hash=existing.content_hash,
                     success=True,
                 )

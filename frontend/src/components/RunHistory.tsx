@@ -136,7 +136,7 @@ export function RunHistory({ onSelectRun, onNewRun, selectedRunId, activeRunId, 
                   {isActive ? (
                     <span className="flex items-center gap-1.5 text-xs text-[var(--kp-green)]">
                       <span className="w-1.5 h-1.5 rounded-full bg-[var(--kp-green)] animate-pulse-soft" />
-                      Stage {run.current_stage || 1}/6
+                      Stage {run.current_stage || 1}
                     </span>
                   ) : run.verdict ? (
                     <span className={cn(

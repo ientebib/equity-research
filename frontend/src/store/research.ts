@@ -14,6 +14,8 @@ const DEFAULT_STAGES: Stage[] = [
   { id: 1, name: 'Data Collection', shortName: 'DATA', status: 'pending' },
   { id: 2, name: 'Discovery', shortName: 'DISC', status: 'pending' },
   { id: 3, name: 'Deep Research', shortName: 'DEEP', status: 'pending' },
+  { id: 3.5, name: 'Verification', shortName: 'VRFY', status: 'pending' },
+  { id: 3.75, name: 'Integration', shortName: 'INTG', status: 'pending' },
   { id: 4, name: 'Dual Synthesis', shortName: 'SYNTH', status: 'pending' },
   { id: 5, name: 'Editorial Review', shortName: 'EDIT', status: 'pending' },
   { id: 6, name: 'Final Report', shortName: 'FINAL', status: 'pending' },

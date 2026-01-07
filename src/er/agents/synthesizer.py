@@ -760,6 +760,8 @@ class SynthesizerAgent(Agent):
         discovery_output: DiscoveryOutput,
         vertical_analyses: list[VerticalAnalysis],
         feedback: EditorialFeedback,
+        verified_package: VerifiedResearchPackage | None = None,
+        cross_vertical_map: CrossVerticalMap | None = None,
     ) -> SynthesisOutput:
         """Re-synthesize after Judge rejects both reports.
 
@@ -772,6 +774,8 @@ class SynthesizerAgent(Agent):
             discovery_output: Discovery findings from Stage 2.
             vertical_analyses: All vertical analyses from Stage 3.
             feedback: EditorialFeedback with rejection_reason.
+            verified_package: Optional VerifiedResearchPackage from Verifier.
+            cross_vertical_map: Optional CrossVerticalMap from Integrator.
 
         Returns:
             New SynthesisOutput from re-synthesis.
@@ -787,6 +791,12 @@ class SynthesizerAgent(Agent):
 
         # Format vertical analyses - these contain full prose from Deep Research
         vertical_str = self._format_vertical_analyses(vertical_analyses)
+
+        # Format verified facts section
+        verified_facts_section = self._format_verified_facts(verified_package)
+
+        # Format cross-vertical map section
+        cross_vertical_section = self._format_cross_vertical_map(cross_vertical_map)
 
         # Build rejection context
         rejection_context = f"""
@@ -816,6 +826,8 @@ You must address the following critical issues:
             ticker=company_context.symbol,
             company_name=company_context.company_name,
             vertical_analyses=vertical_str,
+            verified_facts_section=verified_facts_section,
+            cross_vertical_section=cross_vertical_section,
         )
 
         # Re-run synthesis with Claude (default)

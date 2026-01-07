@@ -73,6 +73,13 @@ from er.types import (
     VerticalAnalysis,
 )
 
+# Valuation and report modules
+from er.valuation.dcf import DCFEngine, DCFInputs, WACCInputs, DCFResult
+from er.valuation.reverse_dcf import ReverseDCFEngine, ReverseDCFInputs, ReverseDCFResult
+from er.valuation.excel_export import ValuationExporter, ValuationWorkbook
+from er.reports.compiler import ReportCompiler, CompiledReport
+from er.peers.selector import PeerSelector, PeerGroup, create_default_peer_database
+
 logger = get_logger(__name__)
 
 
@@ -330,7 +337,7 @@ class ResearchPipeline:
         data = self._load_checkpoint("stage1_company_context")
         if not data:
             return None
-        return CompanyContext(**data)
+        return CompanyContext.from_dict(data)
 
     def _load_discovery_output(self) -> DiscoveryOutput | None:
         """Load DiscoveryOutput from checkpoint."""
@@ -339,7 +346,7 @@ class ResearchPipeline:
             return None
 
         # Convert nested dicts to proper types
-        from er.types import DiscoveredThread, ResearchGroup, ThreadType
+        from er.types import DiscoveredThread, ResearchGroup, ThreadType, ThreadBrief
 
         threads = []
         for t in data.get("research_threads", []):
@@ -358,6 +365,20 @@ class ResearchPipeline:
         for g in data.get("research_groups", []):
             groups.append(ResearchGroup(**g))
 
+        # Restore thread_briefs
+        thread_briefs = []
+        for tb in data.get("thread_briefs", []):
+            if isinstance(tb, dict):
+                thread_briefs.append(ThreadBrief(
+                    thread_id=tb.get("thread_id", ""),
+                    rationale=tb.get("rationale", ""),
+                    hypotheses=tb.get("hypotheses", []),
+                    key_questions=tb.get("key_questions", []),
+                    required_evidence=tb.get("required_evidence", []),
+                    key_evidence_ids=tb.get("key_evidence_ids", []),
+                    confidence=tb.get("confidence", 0.5),
+                ))
+
         return DiscoveryOutput(
             official_segments=data.get("official_segments", []),
             research_threads=threads,
@@ -367,6 +388,7 @@ class ResearchPipeline:
             data_gaps=data.get("data_gaps", []),
             conflicting_signals=data.get("conflicting_signals", []),
             evidence_ids=data.get("evidence_ids", []),
+            thread_briefs=thread_briefs,
         )
 
     def _load_vertical_analyses(self) -> tuple[list[GroupResearchOutput], list[VerticalAnalysis]] | None:
@@ -380,15 +402,23 @@ class ResearchPipeline:
         # Convert group research outputs
         groups = []
         for g in group_data:
-            # Convert vertical analyses within each group
+            # Convert vertical analyses within each group using from_dict
             vas = []
             for v in g.get("vertical_analyses", []):
-                vas.append(VerticalAnalysis(**v))
+                if isinstance(v, dict):
+                    vas.append(VerticalAnalysis.from_dict(v))
+                elif isinstance(v, VerticalAnalysis):
+                    vas.append(v)
             g["vertical_analyses"] = vas
             groups.append(GroupResearchOutput(**g))
 
-        # Convert standalone vertical analyses
-        verticals = [VerticalAnalysis(**v) for v in vertical_data]
+        # Convert standalone vertical analyses using from_dict
+        verticals = []
+        for v in vertical_data:
+            if isinstance(v, dict):
+                verticals.append(VerticalAnalysis.from_dict(v))
+            elif isinstance(v, VerticalAnalysis):
+                verticals.append(v)
 
         return groups, verticals
 
@@ -434,16 +464,22 @@ class ResearchPipeline:
             key_weaknesses=data.get("key_weaknesses", []),
         )
 
-    def _get_completed_stages(self) -> set[int]:
-        """Determine which stages have completed checkpoints."""
+    def _get_completed_stages(self) -> set[float]:
+        """Determine which stages have completed checkpoints.
+
+        Returns a set of stage numbers (int or float) that have completed.
+        Float stages like 3.5 and 3.75 are supported.
+        """
         if not self.config.resume_from_run_dir:
             return set()
 
-        completed = set()
+        completed: set[float] = set()
         stage_files = {
             1: "stage1_company_context.json",
             2: "stage2_discovery.json",
             3: "stage3_verticals.json",  # Need both stage3 files
+            3.5: "stage3_5_verification.json",
+            3.75: "stage3_75_integration.json",
             4: "stage4_claude_synthesis.json",  # Need both stage4 files
             5: "stage5_editorial_feedback.json",
             6: "stage6_final_report.json",
@@ -469,6 +505,120 @@ class ResearchPipeline:
                     completed.add(stage)
 
         return completed
+
+    def _load_verification_output(self) -> VerifiedResearchPackage | None:
+        """Load Stage 3.5 verification output from checkpoint."""
+        data = self._load_checkpoint("stage3_5_verification")
+        if not data:
+            return None
+
+        from er.types import (
+            VerifiedFact, VerificationResult, VerificationStatus, Fact, FactCategory
+        )
+
+        # Reconstruct verification results
+        verification_results = []
+        for vr in data.get("verification_results", []):
+            verified_facts = []
+            for vf_data in vr.get("verified_facts", []):
+                # Reconstruct original fact
+                orig_fact_data = vf_data.get("original_fact", {})
+                original_fact = Fact(
+                    fact_id=orig_fact_data.get("fact_id", ""),
+                    statement=orig_fact_data.get("statement", ""),
+                    category=FactCategory(orig_fact_data.get("category", "other")),
+                    evidence_id=orig_fact_data.get("evidence_id", ""),
+                    source=orig_fact_data.get("source", ""),
+                    source_date=orig_fact_data.get("source_date"),
+                    confidence=orig_fact_data.get("confidence", 0.5),
+                    vertical_id=orig_fact_data.get("vertical_id"),
+                )
+                verified_facts.append(VerifiedFact(
+                    original_fact=original_fact,
+                    status=VerificationStatus(vf_data.get("status", "unverifiable")),
+                    verification_notes=vf_data.get("verification_notes", ""),
+                    ground_truth_source=vf_data.get("ground_truth_source"),
+                    confidence_adjustment=vf_data.get("confidence_adjustment", 0.0),
+                ))
+            verification_results.append(VerificationResult(
+                vertical_name=vr.get("vertical_name", ""),
+                thread_id=vr.get("thread_id", ""),
+                verified_facts=verified_facts,
+                verified_count=vr.get("verified_count", 0),
+                contradicted_count=vr.get("contradicted_count", 0),
+                unverifiable_count=vr.get("unverifiable_count", 0),
+                critical_contradictions=vr.get("critical_contradictions", []),
+            ))
+
+        # Reconstruct all_verified_facts
+        all_verified_facts = []
+        for vr in verification_results:
+            all_verified_facts.extend(vr.verified_facts)
+
+        return VerifiedResearchPackage(
+            ticker=data.get("ticker", ""),
+            verification_results=verification_results,
+            all_verified_facts=all_verified_facts,
+            total_facts=data.get("total_facts", 0),
+            verified_count=data.get("verified_count", 0),
+            contradicted_count=data.get("contradicted_count", 0),
+            unverifiable_count=data.get("unverifiable_count", 0),
+            critical_issues=data.get("critical_issues", []),
+            evidence_ids=data.get("evidence_ids", []),
+        )
+
+    def _load_integration_output(self) -> CrossVerticalMap | None:
+        """Load Stage 3.75 integration output from checkpoint."""
+        data = self._load_checkpoint("stage3_75_integration")
+        if not data:
+            return None
+
+        from er.types import (
+            VerticalRelationship, SharedRisk, CrossVerticalInsight, RelationshipType
+        )
+
+        # Reconstruct relationships
+        relationships = []
+        for r in data.get("relationships", []):
+            relationships.append(VerticalRelationship(
+                source_vertical=r.get("source_vertical", ""),
+                target_vertical=r.get("target_vertical", ""),
+                relationship_type=RelationshipType(r.get("relationship_type", "dependency")),
+                description=r.get("description", ""),
+                strength=r.get("strength", "medium"),
+                supporting_facts=r.get("supporting_facts", []),
+            ))
+
+        # Reconstruct shared risks
+        shared_risks = []
+        for sr in data.get("shared_risks", []):
+            shared_risks.append(SharedRisk(
+                risk_description=sr.get("risk_description", ""),
+                affected_verticals=sr.get("affected_verticals", []),
+                severity=sr.get("severity", "medium"),
+                probability=sr.get("probability", "medium"),
+                mitigation_notes=sr.get("mitigation_notes"),
+            ))
+
+        # Reconstruct cross-vertical insights
+        cross_vertical_insights = []
+        for cvi in data.get("cross_vertical_insights", []):
+            cross_vertical_insights.append(CrossVerticalInsight(
+                insight=cvi.get("insight", ""),
+                related_verticals=cvi.get("related_verticals", []),
+                implication=cvi.get("implication", ""),
+                confidence=cvi.get("confidence", 0.5),
+            ))
+
+        return CrossVerticalMap(
+            ticker=data.get("ticker", ""),
+            relationships=relationships,
+            shared_risks=shared_risks,
+            cross_vertical_insights=cross_vertical_insights,
+            key_dependencies=data.get("key_dependencies", []),
+            foundational_verticals=data.get("foundational_verticals", []),
+            evidence_ids=data.get("evidence_ids", []),
+        )
 
     def _emit_progress(
         self,
@@ -656,45 +806,59 @@ class ResearchPipeline:
 
             # ============== STAGE 3.5: Verification ==============
             set_phase("verification")
-            self._emit_progress(3.5, "starting", "Verifying facts against ground truth data...")
-            logger.info("Stage 3.5: Verification", ticker=ticker)
+            if 3.5 in completed_stages:
+                self._emit_progress(3.5, "complete", "Loaded from checkpoint")
+                logger.info("Stage 3.5: Loading from checkpoint", ticker=ticker)
+                verified_package = self._load_verification_output()
+                if not verified_package:
+                    raise ValueError("Failed to load verification output from checkpoint")
+            else:
+                self._emit_progress(3.5, "starting", "Verifying facts against ground truth data...")
+                logger.info("Stage 3.5: Verification", ticker=ticker)
 
-            verified_package = await self._run_verification(
-                run_state,
-                company_context,
-                group_research_outputs,
-            )
-            self._save_stage_output("stage3_5_verification", verified_package)
-            await self._log_stage_event(
-                run_state, "verification", "complete",
-                f"{verified_package.verified_count}/{verified_package.total_facts} verified"
-            )
-            self._emit_progress(
-                3.5, "complete",
-                f"Verified {verified_package.verified_count}/{verified_package.total_facts} facts, "
-                f"{verified_package.contradicted_count} contradictions"
-            )
+                verified_package = await self._run_verification(
+                    run_state,
+                    company_context,
+                    group_research_outputs,
+                )
+                self._save_stage_output("stage3_5_verification", verified_package)
+                await self._log_stage_event(
+                    run_state, "verification", "complete",
+                    f"{verified_package.verified_count}/{verified_package.total_facts} verified"
+                )
+                self._emit_progress(
+                    3.5, "complete",
+                    f"Verified {verified_package.verified_count}/{verified_package.total_facts} facts, "
+                    f"{verified_package.contradicted_count} contradictions"
+                )
 
             # ============== STAGE 3.75: Integration ==============
             set_phase("integration")
-            self._emit_progress(3.75, "starting", "Finding cross-vertical patterns and dependencies...")
-            logger.info("Stage 3.75: Integration", ticker=ticker)
+            if 3.75 in completed_stages:
+                self._emit_progress(3.75, "complete", "Loaded from checkpoint")
+                logger.info("Stage 3.75: Loading from checkpoint", ticker=ticker)
+                cross_vertical_map = self._load_integration_output()
+                if not cross_vertical_map:
+                    raise ValueError("Failed to load integration output from checkpoint")
+            else:
+                self._emit_progress(3.75, "starting", "Finding cross-vertical patterns and dependencies...")
+                logger.info("Stage 3.75: Integration", ticker=ticker)
 
-            cross_vertical_map = await self._run_integration(
-                run_state,
-                verified_package,
-                company_context.company_name,
-            )
-            self._save_stage_output("stage3_75_integration", cross_vertical_map)
-            await self._log_stage_event(
-                run_state, "integration", "complete",
-                f"{len(cross_vertical_map.relationships)} relationships, {len(cross_vertical_map.shared_risks)} shared risks"
-            )
-            self._emit_progress(
-                3.75, "complete",
-                f"Found {len(cross_vertical_map.relationships)} relationships, "
-                f"{len(cross_vertical_map.shared_risks)} shared risks"
-            )
+                cross_vertical_map = await self._run_integration(
+                    run_state,
+                    verified_package,
+                    company_context.company_name,
+                )
+                self._save_stage_output("stage3_75_integration", cross_vertical_map)
+                await self._log_stage_event(
+                    run_state, "integration", "complete",
+                    f"{len(cross_vertical_map.relationships)} relationships, {len(cross_vertical_map.shared_risks)} shared risks"
+                )
+                self._emit_progress(
+                    3.75, "complete",
+                    f"Found {len(cross_vertical_map.relationships)} relationships, "
+                    f"{len(cross_vertical_map.shared_risks)} shared risks"
+                )
 
             # ============== STAGE 4: Dual Synthesis (Parallel) ==============
             set_phase("synthesis")
@@ -772,9 +936,11 @@ class ResearchPipeline:
                 final_report = await self._run_resynthesis(
                     run_state,
                     company_context,
-                    discovery,
+                    discovery_output,
                     vertical_analyses,
                     editorial_feedback,
+                    verified_package=verified_package,
+                    cross_vertical_map=cross_vertical_map,
                 )
             else:
                 self._emit_progress(6, "starting", f"Revising {editorial_feedback.preferred_synthesis.upper()} synthesis with editorial feedback...")
@@ -804,6 +970,66 @@ class ResearchPipeline:
             )
             self._save_stage_output("stage6_final_report", final_report)
             await self._log_stage_event(run_state, "revision", "complete", f"{final_report.investment_view} ({final_report.conviction})")
+
+            # ============== STAGE 7: Valuation & Report Compilation ==============
+            # Run valuation and report compilation (non-blocking, artifacts stored)
+            valuation_workbook: ValuationWorkbook | None = None
+            compiled_report: CompiledReport | None = None
+            peer_group: PeerGroup | None = None
+
+            try:
+                valuation_workbook, peer_group = await self._run_valuation(
+                    run_state,
+                    company_context,
+                    final_report,
+                )
+
+                if valuation_workbook:
+                    self._save_stage_output("stage7_valuation", valuation_workbook.to_dict())
+
+                if peer_group:
+                    self._save_stage_output("stage7_peers", peer_group.to_dict())
+
+                # Compile the final report
+                compiled_report = await self._compile_report(
+                    run_state,
+                    company_context,
+                    final_report,
+                    verified_package,
+                    valuation_workbook,
+                )
+
+                if compiled_report:
+                    self._save_stage_output("stage7_compiled_report", compiled_report.to_dict())
+
+                    # Export Excel workbook
+                    if self.config.output_dir and valuation_workbook:
+                        excel_path = await self._export_excel(
+                            valuation_workbook,
+                            self.config.output_dir,
+                        )
+                        if excel_path:
+                            logger.info(
+                                "Excel export complete",
+                                ticker=ticker,
+                                excel_path=str(excel_path),
+                            )
+
+                logger.info(
+                    "Valuation and report compilation complete",
+                    ticker=ticker,
+                    has_dcf=valuation_workbook is not None and valuation_workbook.dcf_result is not None,
+                    has_reverse_dcf=valuation_workbook is not None and valuation_workbook.reverse_dcf_result is not None,
+                    peer_count=len(peer_group.peers) if peer_group else 0,
+                )
+
+            except Exception as e:
+                # Valuation failures shouldn't crash the pipeline
+                logger.warning(
+                    "Valuation/compilation failed (non-fatal)",
+                    ticker=ticker,
+                    error=str(e),
+                )
 
             # Calculate totals
             end_time = asyncio.get_event_loop().time()
@@ -1033,6 +1259,7 @@ class ResearchPipeline:
                     group_threads,
                     use_deep_research=self.config.use_deep_research_verticals,
                     other_groups=other_groups,  # Pass other groups for co-analyst coordination!
+                    discovery_output=discovery_output,  # For evidence propagation
                 )
             finally:
                 await agent.close()
@@ -1270,9 +1497,11 @@ class ResearchPipeline:
         self,
         run_state: RunState,
         company_context: CompanyContext,
-        discovery: DiscoveryOutput,
+        discovery_output: DiscoveryOutput,
         vertical_analyses: list[VerticalAnalysis],
         feedback: EditorialFeedback,
+        verified_package: VerifiedResearchPackage | None = None,
+        cross_vertical_map: CrossVerticalMap | None = None,
     ) -> SynthesisOutput:
         """Re-synthesize after Judge rejects both reports.
 
@@ -1282,9 +1511,11 @@ class ResearchPipeline:
         Args:
             run_state: Current run state.
             company_context: Company data context.
-            discovery: Discovery output.
+            discovery_output: Discovery output.
             vertical_analyses: Vertical analyses.
             feedback: Editorial feedback with rejection_reason.
+            verified_package: Optional VerifiedResearchPackage from Verifier.
+            cross_vertical_map: Optional CrossVerticalMap from Integrator.
 
         Returns:
             New SynthesisOutput from re-synthesis.
@@ -1301,10 +1532,303 @@ class ResearchPipeline:
         return await self._synthesizer.resynthesis(
             run_state,
             company_context,
-            discovery,
+            discovery_output,
             vertical_analyses,
             feedback,
+            verified_package=verified_package,
+            cross_vertical_map=cross_vertical_map,
         )
+
+    async def _run_valuation(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        final_report: SynthesisOutput,
+    ) -> tuple[ValuationWorkbook | None, PeerGroup | None]:
+        """Run DCF and Reverse DCF valuation.
+
+        Args:
+            run_state: Current run state.
+            company_context: Company financial data.
+            final_report: Final synthesis output.
+
+        Returns:
+            Tuple of (ValuationWorkbook, PeerGroup) or (None, None) if insufficient data.
+        """
+        ticker = run_state.ticker
+        company_name = company_context.company_name
+
+        # Extract financial data from CompanyContext
+        income_stmt = company_context.income_statement_quarterly
+        balance_sheet = company_context.balance_sheet_quarterly
+        market_data = getattr(company_context, "market_data", {}) or {}
+
+        if not income_stmt or not balance_sheet:
+            logger.info("Insufficient financial data for valuation", ticker=ticker)
+            return None, None
+
+        latest_income = income_stmt[0] if income_stmt else {}
+        latest_balance = balance_sheet[0] if balance_sheet else {}
+
+        # Get key metrics
+        current_revenue = latest_income.get("revenue", 0)
+        operating_income = latest_income.get("operatingIncome", 0)
+        operating_margin = operating_income / current_revenue if current_revenue > 0 else 0.15
+
+        total_debt = latest_balance.get("totalDebt", 0)
+        cash = latest_balance.get("cashAndCashEquivalents", 0)
+        net_debt = total_debt - cash
+
+        shares_outstanding = market_data.get("sharesOutstanding", 1e9)  # Default 1B shares
+        current_price = market_data.get("price", 0)
+
+        if current_revenue <= 0:
+            logger.info("No revenue data available for valuation", ticker=ticker)
+            return None, None
+
+        # Run DCF
+        dcf_engine = DCFEngine()
+        dcf_result: DCFResult | None = None
+        sensitivity_data: dict[str, Any] | None = None
+
+        try:
+            # Project 5 years of revenue (assume 10% CAGR as placeholder)
+            growth_rate = 0.10
+            revenue_projections = [
+                current_revenue * ((1 + growth_rate) ** (i + 1))
+                for i in range(5)
+            ]
+
+            # Operating margins with slight expansion
+            margin_trajectory = [
+                operating_margin + 0.01 * i
+                for i in range(5)
+            ]
+
+            dcf_inputs = DCFInputs(
+                revenue_projections=revenue_projections,
+                operating_margins=margin_trajectory,
+                current_revenue=current_revenue,
+                wacc=0.10,
+                terminal_growth=0.025,
+            )
+
+            dcf_result = dcf_engine.calculate_dcf(
+                dcf_inputs,
+                net_debt=net_debt,
+                shares_outstanding=shares_outstanding,
+            )
+
+            # Run sensitivity analysis
+            sensitivity_data = dcf_engine.sensitivity_analysis(
+                dcf_inputs,
+                net_debt=net_debt,
+                shares_outstanding=shares_outstanding,
+            )
+
+            logger.info(
+                "DCF valuation complete",
+                ticker=ticker,
+                intrinsic_value=dcf_result.intrinsic_value_per_share,
+            )
+
+        except Exception as e:
+            logger.warning("DCF calculation failed", ticker=ticker, error=str(e))
+
+        # Run Reverse DCF
+        reverse_dcf_result: ReverseDCFResult | None = None
+        if current_price > 0:
+            try:
+                reverse_engine = ReverseDCFEngine()
+                reverse_inputs = ReverseDCFInputs(
+                    current_price=current_price,
+                    shares_outstanding=shares_outstanding,
+                    net_debt=net_debt,
+                    current_revenue=current_revenue,
+                    current_margin=operating_margin,
+                    wacc=0.10,
+                    terminal_growth=0.025,
+                )
+
+                reverse_dcf_result = reverse_engine.calculate_implied_growth(reverse_inputs)
+
+                logger.info(
+                    "Reverse DCF complete",
+                    ticker=ticker,
+                    implied_cagr=reverse_dcf_result.implied_revenue_cagr,
+                )
+
+            except Exception as e:
+                logger.warning("Reverse DCF failed", ticker=ticker, error=str(e))
+
+        # Create valuation workbook
+        valuation_workbook = ValuationWorkbook(
+            ticker=ticker,
+            company_name=company_name,
+            dcf_result=dcf_result,
+            reverse_dcf_result=reverse_dcf_result,
+            sensitivity_data=sensitivity_data,
+        )
+
+        # Run peer selection
+        peer_group: PeerGroup | None = None
+        try:
+            peer_selector = PeerSelector(peer_database=create_default_peer_database())
+            sector = company_context.company_profile.get("sector", "Technology") if company_context.company_profile else "Technology"
+            industry = company_context.company_profile.get("industry", "Software") if company_context.company_profile else "Software"
+            market_cap = market_data.get("marketCap", 0)
+
+            peer_group = peer_selector.select_peers(
+                ticker=ticker,
+                company_name=company_name,
+                sector=sector,
+                industry=industry,
+                market_cap=market_cap,
+                revenue=current_revenue,
+                max_peers=5,
+            )
+
+            logger.info(
+                "Peer selection complete",
+                ticker=ticker,
+                peer_count=len(peer_group.peers),
+            )
+
+        except Exception as e:
+            logger.warning("Peer selection failed", ticker=ticker, error=str(e))
+
+        # Store in WorkspaceStore
+        if self.workspace_store:
+            if dcf_result:
+                self.workspace_store.put_artifact(
+                    artifact_type="dcf_valuation",
+                    producer="pipeline",
+                    json_obj=dcf_result.to_dict(),
+                    summary=f"DCF intrinsic value: ${dcf_result.intrinsic_value_per_share:.2f}",
+                )
+
+            if reverse_dcf_result:
+                self.workspace_store.put_artifact(
+                    artifact_type="reverse_dcf",
+                    producer="pipeline",
+                    json_obj=reverse_dcf_result.to_dict(),
+                    summary=f"Implied CAGR: {reverse_dcf_result.implied_revenue_cagr:.1%}",
+                )
+
+            if peer_group:
+                self.workspace_store.put_artifact(
+                    artifact_type="peer_group",
+                    producer="pipeline",
+                    json_obj=peer_group.to_dict(),
+                    summary=f"Selected {len(peer_group.peers)} peers",
+                )
+
+        return valuation_workbook, peer_group
+
+    async def _compile_report(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        final_report: SynthesisOutput,
+        verified_package: VerifiedResearchPackage | None,
+        valuation_workbook: ValuationWorkbook | None,
+    ) -> CompiledReport | None:
+        """Compile the final research report with citations.
+
+        Args:
+            run_state: Current run state.
+            company_context: Company data.
+            final_report: Final synthesis output.
+            verified_package: Verified research package.
+            valuation_workbook: Valuation results.
+
+        Returns:
+            CompiledReport or None if compilation fails.
+        """
+        try:
+            compiler = ReportCompiler()
+
+            # Get verified facts for citation building
+            verified_facts = verified_package.all_verified_facts if verified_package else None
+
+            # Get current price from market data
+            market_data = getattr(company_context, "market_data", {}) or {}
+            current_price = market_data.get("price")
+
+            compiled = compiler.compile(
+                synthesis_text=final_report.full_report,
+                ticker=run_state.ticker,
+                company_name=company_context.company_name,
+                verified_facts=verified_facts,
+                current_price=current_price,
+            )
+
+            # Store in WorkspaceStore
+            if self.workspace_store:
+                self.workspace_store.put_artifact(
+                    artifact_type="compiled_report",
+                    producer="pipeline",
+                    json_obj=compiled.to_dict(),
+                    summary=f"Report: {compiled.investment_view.value} ({compiled.conviction.value})",
+                )
+
+            logger.info(
+                "Report compilation complete",
+                ticker=run_state.ticker,
+                sections=len(compiled.sections),
+                citations=len(compiled.citations),
+            )
+
+            return compiled
+
+        except Exception as e:
+            logger.warning("Report compilation failed", ticker=run_state.ticker, error=str(e))
+            return None
+
+    async def _export_excel(
+        self,
+        valuation_workbook: ValuationWorkbook,
+        output_dir: Path,
+    ) -> Path | None:
+        """Export valuation to Excel workbook.
+
+        Args:
+            valuation_workbook: Valuation data to export.
+            output_dir: Output directory.
+
+        Returns:
+            Path to Excel file or None if export failed.
+        """
+        try:
+            exporter = ValuationExporter()
+
+            # First try Excel export
+            excel_path = output_dir / f"{valuation_workbook.ticker}_valuation.xlsx"
+            result = exporter.export_excel(valuation_workbook, excel_path)
+
+            if result:
+                return result
+
+            # Fall back to JSON and CSV
+            json_path = output_dir / f"{valuation_workbook.ticker}_valuation.json"
+            exporter.export_json(valuation_workbook, json_path)
+            exporter.export_csv(valuation_workbook, output_dir)
+
+            logger.info(
+                "Valuation exported (fallback format)",
+                ticker=valuation_workbook.ticker,
+                json_path=str(json_path),
+            )
+
+            return json_path
+
+        except Exception as e:
+            logger.warning(
+                "Excel export failed",
+                ticker=valuation_workbook.ticker,
+                error=str(e),
+            )
+            return None
 
     async def close(self) -> None:
         """Close all agents and resources."""

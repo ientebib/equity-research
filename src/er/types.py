@@ -537,6 +537,45 @@ class CompanyContext:
             evidence_ids=tuple(data.get("evidence_ids", [])),
         )
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CompanyContext":
+        """Create CompanyContext from checkpoint dict.
+
+        Handles proper datetime parsing and tuple conversion for evidence_ids.
+        """
+        # Parse fetched_at as datetime
+        fetched_at = data.get("fetched_at")
+        if isinstance(fetched_at, str):
+            fetched_at = datetime.fromisoformat(fetched_at)
+        elif fetched_at is None:
+            fetched_at = utc_now()
+
+        # Convert evidence_ids to tuple
+        evidence_ids = data.get("evidence_ids", [])
+        if isinstance(evidence_ids, list):
+            evidence_ids = tuple(evidence_ids)
+
+        return cls(
+            symbol=data.get("symbol", ""),
+            fetched_at=fetched_at,
+            profile=data.get("profile", {}),
+            income_statement_annual=data.get("income_statement_annual", []),
+            income_statement_quarterly=data.get("income_statement_quarterly", []),
+            balance_sheet_annual=data.get("balance_sheet_annual", []),
+            cash_flow_annual=data.get("cash_flow_annual", []),
+            revenue_product_segmentation=data.get("revenue_product_segmentation", []),
+            revenue_geographic_segmentation=data.get("revenue_geographic_segmentation", []),
+            transcripts=data.get("transcripts", []),
+            news=data.get("news", []),
+            analyst_estimates=data.get("analyst_estimates", []),
+            price_target_summary=data.get("price_target_summary", {}),
+            price_target_consensus=data.get("price_target_consensus", {}),
+            analyst_grades=data.get("analyst_grades", []),
+            quant_metrics=data.get("quant_metrics", {}),
+            market_data=data.get("market_data", {}),
+            evidence_ids=evidence_ids,
+        )
+
     def to_json_payload(self) -> dict[str, Any]:
         """Convert to clean JSON payload for LLM prompts.
 
@@ -1238,7 +1277,8 @@ class DiscoveryOutput:
     def get_group_by_name(self, name: str) -> ResearchGroup | None:
         """Get a research group by name."""
         for group in self.research_groups:
-            return group if group.name == name else None
+            if group.name == name:
+                return group
         return None
 
 
@@ -1397,6 +1437,50 @@ class VerticalAnalysis:
     # Structured output (Phase 6)
     facts: list[Fact] = field(default_factory=list)
     dossier: VerticalDossier | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization."""
+        return {
+            "thread_id": self.thread_id,
+            "vertical_name": self.vertical_name,
+            "business_understanding": self.business_understanding,
+            "evidence_ids": self.evidence_ids,
+            "overall_confidence": self.overall_confidence,
+            "facts": [f.to_dict() for f in self.facts],
+            "dossier": self.dossier.to_dict() if self.dossier else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "VerticalAnalysis":
+        """Create VerticalAnalysis from checkpoint dict.
+
+        Properly reconstructs nested Fact and VerticalDossier objects.
+        """
+        # Reconstruct facts
+        facts = []
+        for f in data.get("facts", []):
+            if isinstance(f, dict):
+                facts.append(Fact.from_dict(f))
+            elif isinstance(f, Fact):
+                facts.append(f)
+
+        # Reconstruct dossier
+        dossier_data = data.get("dossier")
+        dossier = None
+        if dossier_data and isinstance(dossier_data, dict):
+            dossier = VerticalDossier.from_dict(dossier_data)
+        elif isinstance(dossier_data, VerticalDossier):
+            dossier = dossier_data
+
+        return cls(
+            thread_id=data.get("thread_id", ""),
+            vertical_name=data.get("vertical_name", ""),
+            business_understanding=data.get("business_understanding", ""),
+            evidence_ids=data.get("evidence_ids", []),
+            overall_confidence=data.get("overall_confidence", 0.0),
+            facts=facts,
+            dossier=dossier,
+        )
 
 
 @dataclass
@@ -1789,6 +1873,42 @@ class ValuationPack:
 
 
 # ============== Stage 4: Synthesis Output ==============
+
+
+@dataclass
+class Scenario:
+    """Investment scenario (bull/base/bear case).
+
+    Used in synthesis and judge outputs for probability-weighted outcomes.
+    """
+
+    probability: float  # 0.0 to 1.0
+    headline: str  # Short description of the scenario
+    description: str = ""  # Detailed description
+    key_assumptions: list[str] = field(default_factory=list)
+    target_price: float | None = None  # Optional price target for this scenario
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        return {
+            "probability": self.probability,
+            "headline": self.headline,
+            "description": self.description,
+            "key_assumptions": self.key_assumptions,
+            "target_price": self.target_price,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Scenario":
+        """Create from dict."""
+        return cls(
+            probability=data.get("probability", 0.0),
+            headline=data.get("headline", ""),
+            description=data.get("description", ""),
+            key_assumptions=data.get("key_assumptions", []),
+            target_price=data.get("target_price"),
+        )
+
 
 @dataclass
 class SynthesisOutput:

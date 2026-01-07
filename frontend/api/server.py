@@ -170,6 +170,8 @@ def load_run_data(run_id: str) -> dict:
         ("stage2", "stage2_discovery.json"),
         ("stage3_groups", "stage3_group_research.json"),
         ("stage3_verticals", "stage3_verticals.json"),
+        ("stage3_5", "stage3_5_verification.json"),
+        ("stage3_75", "stage3_75_integration.json"),
         ("stage4_claude", "stage4_claude_synthesis.json"),
         ("stage4_gpt", "stage4_gpt_synthesis.json"),
         ("stage5", "stage5_editorial_feedback.json"),
@@ -235,6 +237,29 @@ def load_run_data(run_id: str) -> dict:
     # Extract vertical analyses for traceability
     if "stage3_verticals" in data["stages"]:
         data["verticals"] = data["stages"]["stage3_verticals"]
+
+    # Extract verification output (Stage 3.5)
+    if "stage3_5" in data["stages"]:
+        s35 = data["stages"]["stage3_5"]
+        data["verification"] = {
+            "total_facts": s35.get("total_facts", 0),
+            "verified_count": s35.get("verified_count", 0),
+            "contradicted_count": s35.get("contradicted_count", 0),
+            "unverifiable_count": s35.get("unverifiable_count", 0),
+            "critical_issues": s35.get("critical_issues", []),
+            "verification_results": s35.get("verification_results", []),
+        }
+
+    # Extract integration output (Stage 3.75)
+    if "stage3_75" in data["stages"]:
+        s375 = data["stages"]["stage3_75"]
+        data["integration"] = {
+            "relationships": s375.get("relationships", []),
+            "shared_risks": s375.get("shared_risks", []),
+            "cross_vertical_insights": s375.get("cross_vertical_insights", []),
+            "key_dependencies": s375.get("key_dependencies", []),
+            "foundational_verticals": s375.get("foundational_verticals", []),
+        }
 
     # Extract both syntheses for comparison
     if "stage4_claude" in data["stages"]:

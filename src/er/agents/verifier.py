@@ -17,7 +17,9 @@ from typing import Any
 from er.agents.base import Agent, AgentContext
 from er.llm.router import AgentRole
 from er.types import (
+    ClaimGraph,
     CompanyContext,
+    EntailmentStatus,
     Fact,
     FactCategory,
     GroupResearchOutput,
@@ -28,6 +30,9 @@ from er.types import (
     VerifiedFact,
     VerifiedResearchPackage,
 )
+from er.verification.claim_graph import ClaimGraphBuilder
+from er.verification.entailment import EntailmentVerifier, EntailmentReport
+from er.confidence.calibration import ConfidenceCalibrator, SourceTier
 
 
 class VerificationAgent(Agent):
@@ -51,6 +56,15 @@ class VerificationAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
+
+        # Initialize claim graph builder with LLM router for advanced extraction
+        self._claim_graph_builder = ClaimGraphBuilder(llm_router=context.llm_router)
+
+        # Initialize entailment verifier with LLM router
+        self._entailment_verifier = EntailmentVerifier(llm_router=context.llm_router)
+
+        # Initialize confidence calibrator
+        self._confidence_calibrator = ConfidenceCalibrator()
 
     @property
     def name(self) -> str:
@@ -159,6 +173,67 @@ class VerificationAgent(Agent):
         critical_issues = []
         for vr in verification_results:
             critical_issues.extend(vr.critical_contradictions)
+
+        # === ClaimGraph + Entailment + Confidence Calibration ===
+
+        # Step 1: Build ClaimGraph from vertical analysis dossiers
+        claim_graph = await self._build_claim_graph(
+            run_state.ticker,
+            group_outputs,
+        )
+
+        # Step 2: Build evidence map from EvidenceStore
+        evidence_map = await self._build_evidence_map(all_evidence_ids)
+
+        # Step 3: Run entailment verification on claims
+        entailment_report: EntailmentReport | None = None
+        if claim_graph and claim_graph.claims:
+            # Link evidence to claims before verification
+            claim_graph = self._claim_graph_builder.link_evidence_to_claims(
+                claim_graph,
+                evidence_map,
+            )
+
+            entailment_report = await self._entailment_verifier.verify_claim_graph(
+                claim_graph,
+                evidence_map,
+            )
+
+            # Step 4: Calibrate claim confidence based on entailment results
+            await self._calibrate_claim_confidence(
+                claim_graph,
+                entailment_report,
+            )
+
+            self.log_info(
+                "ClaimGraph + Entailment complete",
+                ticker=run_state.ticker,
+                total_claims=claim_graph.total_claims,
+                cited_claims=claim_graph.cited_claims,
+                claims_verified=entailment_report.claims_verified if entailment_report else 0,
+                claims_contradicted=entailment_report.claims_contradicted if entailment_report else 0,
+            )
+
+        # Step 5: Store ClaimGraph + entailment report in WorkspaceStore
+        if self.workspace_store:
+            if claim_graph:
+                self.workspace_store.put_artifact(
+                    artifact_type="claim_graph",
+                    producer=self.name,
+                    json_obj=claim_graph.to_dict(),
+                    summary=f"ClaimGraph: {claim_graph.total_claims} claims ({claim_graph.cited_claims} cited)",
+                    evidence_ids=all_evidence_ids[:10],
+                )
+
+            if entailment_report:
+                self.workspace_store.put_artifact(
+                    artifact_type="entailment_report",
+                    producer=self.name,
+                    json_obj=entailment_report.to_dict(),
+                    summary=f"Entailment: {entailment_report.claims_verified} supported, "
+                            f"{entailment_report.claims_contradicted} contradicted",
+                    evidence_ids=all_evidence_ids[:10],
+                )
 
         # Create package
         package = VerifiedResearchPackage(
@@ -433,6 +508,165 @@ class VerificationAgent(Agent):
             VerificationStatus.UNVERIFIABLE: -0.1,  # Moderate downgrade
         }
         return adjustments.get(status, 0.0)
+
+    async def _build_claim_graph(
+        self,
+        ticker: str,
+        group_outputs: list[GroupResearchOutput],
+    ) -> ClaimGraph | None:
+        """Build a ClaimGraph from vertical analysis dossiers.
+
+        Extracts claims from vertical dossier text and links them to evidence.
+
+        Args:
+            ticker: Stock ticker symbol.
+            group_outputs: Research outputs containing vertical analyses.
+
+        Returns:
+            ClaimGraph with extracted claims, or None if no dossiers.
+        """
+        # Collect all dossier text from vertical analyses
+        all_dossier_text = []
+        for group in group_outputs:
+            for va in group.vertical_analyses:
+                if va.dossier and va.dossier.full_text:
+                    all_dossier_text.append(va.dossier.full_text)
+
+        if not all_dossier_text:
+            self.log_info("No dossier text found for claim extraction", ticker=ticker)
+            return None
+
+        # Combine dossier text for claim extraction
+        combined_text = "\n\n---\n\n".join(all_dossier_text)
+
+        # Build ClaimGraph - prefer LLM extraction if available
+        try:
+            claim_graph = await self._claim_graph_builder.build_with_llm(
+                text=combined_text,
+                ticker=ticker,
+                source="vertical_dossiers",
+            )
+        except Exception as e:
+            self.log_warning(
+                "LLM claim extraction failed, falling back to pattern-based",
+                ticker=ticker,
+                error=str(e),
+            )
+            claim_graph = self._claim_graph_builder.build_from_text(
+                text=combined_text,
+                ticker=ticker,
+                source="vertical_dossiers",
+            )
+
+        self.log_info(
+            "ClaimGraph built",
+            ticker=ticker,
+            total_claims=claim_graph.total_claims,
+        )
+
+        return claim_graph
+
+    async def _build_evidence_map(
+        self,
+        evidence_ids: list[str],
+    ) -> dict[str, str]:
+        """Build a map of evidence IDs to text snippets from EvidenceStore.
+
+        Args:
+            evidence_ids: List of evidence IDs to retrieve.
+
+        Returns:
+            Dict mapping evidence_id to text content.
+        """
+        evidence_map: dict[str, str] = {}
+
+        if not self.evidence_store:
+            return evidence_map
+
+        for eid in evidence_ids[:50]:  # Limit to avoid too many lookups
+            try:
+                # Try to get evidence card first (has summary)
+                card = self.evidence_store.get_evidence(eid)
+                if card:
+                    # Use excerpt or snippet as the text representation
+                    text = card.get("excerpt") or card.get("snippet") or card.get("summary", "")
+                    if text:
+                        evidence_map[eid] = text[:1000]  # Truncate to reasonable length
+                        continue
+
+                # Fall back to blob if card not available
+                blob = self.evidence_store.get_blob(eid)
+                if blob:
+                    # Blob is raw HTML or text - extract a snippet
+                    text = blob[:1000] if isinstance(blob, str) else blob.decode("utf-8", errors="ignore")[:1000]
+                    evidence_map[eid] = text
+
+            except Exception as e:
+                self.log_warning(
+                    "Failed to retrieve evidence",
+                    evidence_id=eid,
+                    error=str(e),
+                )
+
+        self.log_info(
+            "Evidence map built",
+            evidence_count=len(evidence_map),
+            requested_count=len(evidence_ids),
+        )
+
+        return evidence_map
+
+    async def _calibrate_claim_confidence(
+        self,
+        claim_graph: ClaimGraph,
+        entailment_report: EntailmentReport,
+    ) -> None:
+        """Calibrate claim confidence based on entailment verification results.
+
+        Updates claim confidence in-place using the ConfidenceCalibrator.
+
+        Args:
+            claim_graph: ClaimGraph with claims to calibrate.
+            entailment_report: Entailment results for each claim.
+        """
+        # Build a lookup from claim_id to entailment result
+        entailment_lookup = {
+            result.claim_id: result
+            for result in entailment_report.results
+        }
+
+        calibrated_count = 0
+        for claim in claim_graph.claims:
+            entailment_result = entailment_lookup.get(claim.claim_id)
+
+            # Determine source tier based on evidence presence
+            if claim.cited_evidence_ids:
+                source_tier = SourceTier.TIER_2  # Has citations
+            else:
+                source_tier = SourceTier.TIER_3  # No citations
+
+            # Get entailment status if available
+            entailment_status = None
+            if entailment_result:
+                entailment_status = entailment_result.status
+
+            # Calibrate the claim
+            calibration_result = self._confidence_calibrator.calibrate_claim(
+                claim=claim,
+                source_tier=source_tier,
+                recency_days=None,  # Could be derived from evidence dates if available
+                corroboration_count=len(claim.cited_evidence_ids),
+                entailment_status=entailment_status,
+            )
+
+            # Update claim confidence with calibrated value
+            claim.confidence = calibration_result.calibrated_confidence
+            calibrated_count += 1
+
+        self.log_info(
+            "Confidence calibration complete",
+            claims_calibrated=calibrated_count,
+        )
 
     async def close(self) -> None:
         """Close any open resources."""

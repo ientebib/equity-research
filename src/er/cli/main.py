@@ -22,6 +22,7 @@ from rich.table import Table
 from er import __version__
 from er.config import Settings, clear_settings_cache, get_settings
 from er.exceptions import ConfigurationError
+from er.manifest import RunManifest
 from er.types import Phase, RunState, utc_now
 from er.utils.dates import get_latest_quarter, get_quarter_range, format_quarter
 
@@ -257,6 +258,8 @@ def analyze(
 
     # Handle resume mode
     is_resuming = resume is not None
+    run_manifest: RunManifest | None = None
+
     if is_resuming:
         if not resume.exists():
             error_console.print(f"[red]Error:[/red] Resume directory not found: {resume}")
@@ -266,17 +269,26 @@ def analyze(
         run_output_dir = resume
         manifest_path = run_output_dir / "manifest.json"
 
-        if manifest_path.exists():
-            existing_manifest = json.loads(manifest_path.read_text())
-            run_id = existing_manifest.get("run_id", "resumed_run")
+        # Load or create RunManifest for resume
+        run_manifest = RunManifest.load(run_output_dir)
+        if run_manifest:
+            run_id = run_manifest.run_id
         else:
+            # Create new manifest if none exists
             run_id = f"run_{ticker}_resumed"
+            run_manifest = RunManifest(
+                output_dir=run_output_dir,
+                run_id=run_id,
+                ticker=ticker,
+            )
 
         # Check which stages are already done
         stage_files = [
             "stage1_company_context.json",
             "stage2_discovery.json",
             "stage3_verticals.json",
+            "stage3_5_verification.json",
+            "stage3_75_integration.json",
             "stage4_claude_synthesis.json",
             "stage5_editorial_feedback.json",
         ]
@@ -288,7 +300,7 @@ def analyze(
                 f"[bold]Ticker:[/bold] {ticker}\n"
                 f"[bold]Mode:[/bold] [yellow]RESUME[/yellow]\n"
                 f"[bold]Resume Directory:[/bold] {run_output_dir}\n"
-                f"[bold]Completed Stages:[/bold] {len(completed)}/6\n"
+                f"[bold]Completed Stages:[/bold] {len(completed)}\n"
                 f"[bold]Budget:[/bold] ${effective_budget:.2f}\n"
                 f"[bold]Providers:[/bold] {', '.join(settings.available_providers)}",
                 title="[bold yellow]Resuming Analysis[/bold yellow]",
@@ -308,19 +320,21 @@ def analyze(
         run_output_dir = effective_output_dir / run_state.run_id
         run_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write manifest
-        manifest = {
-            "run_id": run_state.run_id,
+        # Create RunManifest v2
+        run_manifest = RunManifest(
+            output_dir=run_output_dir,
+            run_id=run_state.run_id,
+            ticker=ticker,
+        )
+        run_manifest.set_input_hash({
             "ticker": ticker,
-            "started_at": run_state.started_at.isoformat(),
             "budget_usd": effective_budget,
             "max_rounds": effective_max_rounds,
             "dry_run": dry_run,
-            "phase": run_state.phase.value,
             "providers": settings.available_providers,
-        }
-        manifest_path = run_output_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        })
+        run_manifest.save()
+        manifest_path = run_manifest.manifest_path
 
         # Print run info
         console.print()
@@ -365,11 +379,10 @@ def analyze(
 
     if dry_run:
         console.print("\n[yellow]Dry run mode - no APIs will be called.[/yellow]")
-        if not is_resuming:
+        if not is_resuming and run_manifest:
             run_state.phase = Phase.COMPLETE
-            manifest["phase"] = run_state.phase.value
-            manifest["completed_at"] = utc_now().isoformat()
-            manifest_path.write_text(json.dumps(manifest, indent=2))
+            run_manifest.complete(success=True)
+            run_manifest.save()
     else:
         # Run the actual pipeline
         import asyncio
@@ -422,22 +435,25 @@ def analyze(
             report_content = result.to_report_markdown()
             report_path.write_text(report_content)
 
-            # Update manifest
-            if is_resuming:
-                # Load existing manifest for resume mode
-                manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-                manifest["resumed_at"] = result.started_at.isoformat()
-
-            manifest["phase"] = "complete"
-            manifest["completed_at"] = result.completed_at.isoformat()
-            manifest["total_cost_usd"] = result.total_cost_usd
-            manifest["duration_seconds"] = result.duration_seconds
-            manifest["final_verdict"] = {
-                "investment_view": result.final_report.investment_view,
-                "conviction": result.final_report.conviction,
-                "confidence": result.final_report.overall_confidence,
-            }
-            manifest_path.write_text(json.dumps(manifest, indent=2))
+            # Update manifest using RunManifest v2
+            if run_manifest:
+                run_manifest.add_artifact("report", str(report_path))
+                run_manifest.complete(success=True)
+                run_manifest.save()
+            else:
+                # Fallback for edge cases
+                manifest_data = {
+                    "phase": "complete",
+                    "completed_at": result.completed_at.isoformat(),
+                    "total_cost_usd": result.total_cost_usd,
+                    "duration_seconds": result.duration_seconds,
+                    "final_verdict": {
+                        "investment_view": result.final_report.investment_view,
+                        "conviction": result.final_report.conviction,
+                        "confidence": result.final_report.overall_confidence,
+                    },
+                }
+                manifest_path.write_text(json.dumps(manifest_data, indent=2))
 
             # Print summary
             console.print()
@@ -456,12 +472,10 @@ def analyze(
 
         except Exception as e:
             error_console.print(f"\n[red]Error:[/red] {e}")
-            # Load/create manifest for error recording
-            if is_resuming:
-                manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-            manifest["phase"] = "failed"
-            manifest["error"] = str(e)
-            manifest_path.write_text(json.dumps(manifest, indent=2))
+            # Record error in manifest
+            if run_manifest:
+                run_manifest.fail(str(e))
+                run_manifest.save()
             raise typer.Exit(1)
 
     console.print()
