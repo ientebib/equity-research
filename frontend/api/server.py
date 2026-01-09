@@ -26,6 +26,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from er.exceptions import PipelinePaused
+from er.config import Settings
+from er.llm.router import LLMRouter, AgentRole, EscalationLevel
+from er.manifest import RunManifest
+from er.types import Phase
+from er.workspace.store import WorkspaceStore
+from er.evidence.store import EvidenceStore
+from er.utils.dates import get_latest_quarter, get_quarter_range
+
 # Add parent src to path for pipeline imports
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -49,15 +58,66 @@ class RunConfig(BaseModel):
     use_dual_discovery: bool = True
     use_deep_research: bool = True
     transcripts_dir: Optional[str] = None
+    manual_transcripts: Optional[list[dict[str, Any]]] = None
+    require_discovery_approval: bool = False
+    external_discovery_overrides: Optional[dict[str, list[str]]] = None
+    external_discovery_override_mode: str = "append"
+
+
+class EvidenceRequest(BaseModel):
+    ids: list[str]
+
+
+class DiscoveryReviewRequest(BaseModel):
+    discovery: dict[str, Any]
+    notes: Optional[str] = None
+
+
+def _load_transcripts_from_dir(
+    ticker: str,
+    transcripts_dir: Path,
+    num_quarters: int = 4,
+) -> list[dict]:
+    """Load transcripts from text files in a directory."""
+    transcripts: list[dict] = []
+
+    current_year, current_quarter = get_latest_quarter()
+    quarters_to_load = get_quarter_range(current_year, current_quarter, num_quarters)
+
+    for year, quarter in quarters_to_load:
+        patterns = [
+            f"q{quarter}_{year}.txt",
+            f"Q{quarter}_{year}.txt",
+            f"q{quarter}{year}.txt",
+            f"{year}_q{quarter}.txt",
+        ]
+
+        for pattern in patterns:
+            file_path = transcripts_dir / pattern
+            if not file_path.exists():
+                continue
+            text = file_path.read_text(encoding="utf-8")
+            transcripts.append({
+                "ticker": ticker,
+                "quarter": quarter,
+                "year": year,
+                "text": text,
+                "source": "file",
+                "date": f"{year}-{quarter * 3:02d}-01",
+            })
+            break
+
+    return transcripts
 
 
 @dataclass
 class AgentEvent:
     """Event from an agent during pipeline execution."""
     timestamp: str
-    event_type: str  # agent_start, agent_progress, agent_complete, agent_error
+    type: str  # stage_update, run_complete, run_error, etc.
+    event_type: str  # legacy alias for type (kept for backward compatibility)
     agent_name: str
-    stage: int
+    stage: float
     data: dict = field(default_factory=dict)
 
 
@@ -68,7 +128,7 @@ class RunSession:
     ticker: str
     config: RunConfig
     status: str = "pending"  # pending, running, complete, error, cancelled
-    current_stage: int = 0
+    current_stage: float = 0.0
     current_agent: Optional[str] = None
     cost: float = 0.0
     started_at: Optional[datetime] = None
@@ -78,10 +138,11 @@ class RunSession:
     error: Optional[str] = None
     result: Optional[dict] = None
 
-    def emit(self, event_type: str, agent_name: str, stage: int, **data):
+    def emit(self, event_type: str, agent_name: str, stage: float, **data):
         """Emit an event to the stream."""
         event = AgentEvent(
             timestamp=datetime.now(timezone.utc).isoformat(),
+            type=event_type,
             event_type=event_type,
             agent_name=agent_name,
             stage=stage,
@@ -102,6 +163,40 @@ def get_output_dir() -> Path:
     return OUTPUT_DIR
 
 
+def _load_evidence_cards(run_dir: Path) -> dict[str, dict[str, Any]]:
+    """Load evidence cards from workspace and map evidence_id -> card."""
+    workspace_path = run_dir / "workspace.db"
+    if not workspace_path.exists():
+        return {}
+
+    store = WorkspaceStore(workspace_path)
+    try:
+        artifacts = store.list_artifacts("evidence_card")
+    finally:
+        store.close()
+
+    mapping: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        content = artifact.get("content", {}) or {}
+        card = {
+            "title": content.get("title"),
+            "url": content.get("url"),
+            "summary": content.get("summary"),
+            "key_facts": content.get("key_facts", []),
+            "source": content.get("source"),
+            "published_date": content.get("published_date"),
+            "raw_evidence_id": content.get("raw_evidence_id"),
+            "summary_evidence_id": content.get("summary_evidence_id"),
+            "card_id": content.get("card_id"),
+            "type": "evidence_card",
+        }
+        for eid in [card["raw_evidence_id"], card["summary_evidence_id"], card["card_id"]]:
+            if eid:
+                mapping[eid] = card
+
+    return mapping
+
+
 def list_completed_runs(limit: int = 50) -> list[dict]:
     """List completed runs from output directory."""
     runs = []
@@ -114,27 +209,54 @@ def list_completed_runs(limit: int = 50) -> list[dict]:
         if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
             continue
 
-        manifest_path = run_dir / "manifest.json"
-        if not manifest_path.exists():
+        manifest = RunManifest.load(run_dir)
+        if not manifest:
             continue
 
-        try:
-            manifest = json.loads(manifest_path.read_text())
-            runs.append({
-                "run_id": manifest.get("run_id", run_dir.name),
-                "ticker": manifest.get("ticker", "???"),
-                "started_at": manifest.get("started_at"),
-                "completed_at": manifest.get("completed_at"),
-                "duration": manifest.get("duration_seconds", 0),
-                "total_cost": manifest.get("total_cost_usd", 0),
-                "verdict": manifest.get("final_verdict", {}),
-                "status": "complete" if manifest.get("phase") == "complete" else manifest.get("phase", "unknown"),
-            })
+        manifest_data = manifest.to_dict()
+        started_at = manifest_data.get("started_at")
+        completed_at = manifest_data.get("completed_at")
 
-            if len(runs) >= limit:
-                break
-        except Exception:
-            continue
+        duration_seconds = 0
+        if started_at and completed_at:
+            try:
+                duration_seconds = (
+                    datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)
+                ).total_seconds()
+            except Exception:
+                duration_seconds = 0
+
+        budget_info = manifest_data.get("budget") or {}
+        total_cost = budget_info.get("used", 0)
+
+        # Derive verdict from stage6 if available
+        verdict = {}
+        stage6_path = run_dir / "stage6_final_report.json"
+        if stage6_path.exists():
+            try:
+                stage6 = json.loads(stage6_path.read_text())
+                verdict = {
+                    "investment_view": stage6.get("investment_view"),
+                    "conviction": stage6.get("conviction"),
+                    "confidence": stage6.get("overall_confidence"),
+                }
+            except Exception:
+                verdict = {}
+
+        runs.append({
+            "run_id": manifest_data.get("run_id", run_dir.name),
+            "ticker": manifest_data.get("ticker", "???"),
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration": duration_seconds,
+            "total_cost": total_cost,
+            "verdict": verdict,
+            "status": "complete" if manifest_data.get("status") == "completed" else manifest_data.get("status", "unknown"),
+            "manifest": manifest_data,
+        })
+
+        if len(runs) >= limit:
+            break
 
     return runs
 
@@ -148,9 +270,9 @@ def load_run_data(run_id: str) -> dict:
     data = {"run_id": run_id, "stages": {}}
 
     # Load manifest
-    manifest_path = run_dir / "manifest.json"
-    if manifest_path.exists():
-        data["manifest"] = json.loads(manifest_path.read_text())
+    manifest = RunManifest.load(run_dir)
+    if manifest:
+        data["manifest"] = manifest.to_dict()
 
     # Load costs
     costs_path = run_dir / "costs.json"
@@ -167,6 +289,8 @@ def load_run_data(run_id: str) -> dict:
         ("stage1", "stage1_company_context.json"),
         ("stage2_internal", "stage2_internal_discovery.json"),
         ("stage2_external", "stage2_external_discovery.json"),
+        ("stage2_external_light", "stage2_external_discovery_light.json"),
+        ("stage2_external_anchored", "stage2_external_discovery_anchored.json"),
         ("stage2", "stage2_discovery.json"),
         ("stage3_groups", "stage3_group_research.json"),
         ("stage3_verticals", "stage3_verticals.json"),
@@ -226,12 +350,43 @@ def load_run_data(run_id: str) -> dict:
             "key_weaknesses": s5.get("key_weaknesses"),
         }
 
-    # Extract discovery threads for traceability
-    if "stage2" in data["stages"]:
+    # Extract discovery threads for traceability (prefer review override)
+    s2 = None
+    review_path = run_dir / "stage2_discovery_review.json"
+    if review_path.exists():
+        try:
+            s2 = json.loads(review_path.read_text())
+        except Exception:
+            s2 = None
+    if s2 is None and "stage2" in data["stages"]:
         s2 = data["stages"]["stage2"]
+
+    if s2:
         data["discovery"] = {
             "official_segments": s2.get("official_segments", []),
             "research_threads": s2.get("research_threads", []),
+            "research_groups": s2.get("research_groups", []),
+            "cross_cutting_themes": s2.get("cross_cutting_themes", []),
+            "optionality_candidates": s2.get("optionality_candidates", []),
+            "data_gaps": s2.get("data_gaps", []),
+            "conflicting_signals": s2.get("conflicting_signals", []),
+            "evidence_ids": s2.get("evidence_ids", []),
+            "thread_briefs": s2.get("thread_briefs", []),
+            "searches_performed": s2.get("searches_performed", []),
+        }
+
+        internal_searches = data["stages"].get("stage2_internal", {}).get("searches_performed", [])
+        external_light = data["stages"].get("stage2_external_light", {}).get("searches_performed", [])
+        external_anchored = data["stages"].get("stage2_external_anchored", {}).get("searches_performed", [])
+        external_legacy = data["stages"].get("stage2_external", {}).get("searches_performed", [])
+
+        if not external_light and not external_anchored and external_legacy:
+            external_anchored = external_legacy
+
+        data["discovery"]["searches"] = {
+            "internal": internal_searches,
+            "external_light": external_light,
+            "external_anchored": external_anchored,
         }
 
     # Extract vertical analyses for traceability
@@ -287,8 +442,9 @@ def load_run_data(run_id: str) -> dict:
 
 # ============== Pipeline Runner with Event Streaming ==============
 
-async def run_pipeline_with_events(session: RunSession):
+async def run_pipeline_with_events(session: RunSession, resume: bool = False):
     """Run the equity research pipeline with real-time event streaming."""
+    run_manifest: RunManifest | None = None
     try:
         from er.coordinator.pipeline import ResearchPipeline, PipelineConfig
         from er.config import Settings
@@ -305,16 +461,61 @@ async def run_pipeline_with_events(session: RunSession):
         run_output_dir = OUTPUT_DIR / session.run_id
         run_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load transcripts if directory provided
-        manual_transcripts = None
-        if session.config.transcripts_dir:
+        # Persist run config for resume/approval flows
+        run_config_path = run_output_dir / "run_config.json"
+        if not resume:
+            run_config_path.write_text(
+                json.dumps(session.config.model_dump(), indent=2)
+            )
+
+        # Initialize or load RunManifest v2
+        if resume:
+            run_manifest = RunManifest.load(run_output_dir)
+            if run_manifest:
+                run_manifest.status = "running"
+                run_manifest.phase = Phase.DISCOVERY
+                run_manifest.save()
+        else:
+            run_manifest = RunManifest(
+                output_dir=run_output_dir,
+                run_id=session.run_id,
+                ticker=session.ticker,
+            )
+            run_manifest.set_input_hash({
+                "ticker": session.ticker,
+                "budget": session.config.budget,
+                "quarters": session.config.quarters,
+                "include_transcripts": session.config.include_transcripts,
+                "use_dual_discovery": session.config.use_dual_discovery,
+                "use_deep_research": session.config.use_deep_research,
+                "transcripts_dir": session.config.transcripts_dir,
+                "require_discovery_approval": session.config.require_discovery_approval,
+            })
+
+        # Load transcripts (manual payload takes precedence over directory)
+        manual_transcripts: list[dict] | None = None
+        if session.config.manual_transcripts:
+            manual_transcripts = session.config.manual_transcripts
+        elif session.config.transcripts_dir:
             transcripts_path = Path(session.config.transcripts_dir)
+            if not transcripts_path.is_absolute():
+                transcripts_path = ROOT / transcripts_path
             if transcripts_path.exists():
                 transcripts_file = transcripts_path / "transcripts.json"
                 if transcripts_file.exists():
                     manual_transcripts = json.loads(transcripts_file.read_text())
+                else:
+                    manual_transcripts = _load_transcripts_from_dir(
+                        session.ticker,
+                        transcripts_path,
+                        session.config.quarters,
+                    )
 
         # Create pipeline config
+        pause_after_stage = 2 if session.config.require_discovery_approval else None
+        if resume:
+            pause_after_stage = None
+
         pipeline_config = PipelineConfig(
             output_dir=run_output_dir,
             include_transcripts=session.config.include_transcripts,
@@ -323,11 +524,15 @@ async def run_pipeline_with_events(session: RunSession):
             use_dual_discovery=session.config.use_dual_discovery,
             use_deep_research_verticals=session.config.use_deep_research,
             max_budget_usd=session.config.budget,
+            pause_after_stage=pause_after_stage,
+            resume_from_run_dir=run_output_dir if resume else None,
+            external_discovery_overrides=session.config.external_discovery_overrides,
+            external_discovery_override_mode=session.config.external_discovery_override_mode,
         )
 
         # Progress callback that emits events
         def progress_callback(
-            stage: int,
+            stage: float,
             stage_name: str,
             status: str,
             detail: str = "",
@@ -347,7 +552,7 @@ async def run_pipeline_with_events(session: RunSession):
 
             session.current_agent = agent_name
 
-            event_type = "stage_start" if status == "starting" else f"stage_{status}"
+            event_type = "stage_update"
             session.emit(event_type, agent_name, stage,
                 stage_name=stage_name,
                 status=status,
@@ -362,6 +567,7 @@ async def run_pipeline_with_events(session: RunSession):
             config=pipeline_config,
             progress_callback=progress_callback,
         )
+        run_manifest.set_budget_tracker(pipeline.budget_tracker)
 
         result = await pipeline.run(session.ticker)
 
@@ -378,22 +584,11 @@ async def run_pipeline_with_events(session: RunSession):
             "duration": result.duration_seconds,
         }
 
-        # Write manifest
-        manifest = {
-            "run_id": session.run_id,
-            "ticker": session.ticker,
-            "started_at": session.started_at.isoformat(),
-            "completed_at": session.completed_at.isoformat(),
-            "duration_seconds": result.duration_seconds,
-            "total_cost_usd": result.total_cost_usd,
-            "phase": "complete",
-            "final_verdict": {
-                "investment_view": result.final_report.investment_view,
-                "conviction": result.final_report.conviction,
-                "confidence": result.final_report.overall_confidence,
-            },
-        }
-        (run_output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        # Update manifest
+        if run_manifest:
+            run_manifest.add_artifact("report", "report.md")
+            run_manifest.add_artifact("stage6_final_report", "stage6_final_report.json")
+            run_manifest.complete(success=True)
 
         # Write report
         (run_output_dir / "report.md").write_text(result.to_report_markdown())
@@ -408,7 +603,21 @@ async def run_pipeline_with_events(session: RunSession):
         session.status = "cancelled"
         session.error = "Run cancelled by user"
         session.emit("run_cancelled", "Pipeline", session.current_stage)
+        if run_manifest:
+            run_manifest.fail("Run cancelled by user")
         raise
+
+    except PipelinePaused as e:
+        session.status = "paused"
+        session.error = None
+        session.emit("run_paused", "Pipeline", session.current_stage,
+            message=str(e),
+        )
+        if run_manifest:
+            run_manifest.status = "paused"
+            run_manifest.phase = Phase.DISCOVERY
+            run_manifest.save()
+        return
 
     except Exception as e:
         session.status = "error"
@@ -417,9 +626,13 @@ async def run_pipeline_with_events(session: RunSession):
             error=str(e),
             traceback=traceback.format_exc(),
         )
+        if run_manifest:
+            run_manifest.fail(str(e))
         raise
 
     finally:
+        if session.status == "paused":
+            return
         # Keep session for 5 minutes after completion for clients to catch up
         await asyncio.sleep(300)
         if session.run_id in active_runs:
@@ -464,7 +677,7 @@ async def get_run(run_id: str):
     # Check active runs first
     if run_id in active_runs:
         session = active_runs[run_id]
-        return {
+        payload = {
             "run_id": session.run_id,
             "ticker": session.ticker,
             "status": session.status,
@@ -476,6 +689,19 @@ async def get_run(run_id: str):
             "result": session.result,
             "events": [asdict(e) for e in list(session.events)[-100:]],  # Last 100 events
         }
+
+        if session.status == "paused":
+            try:
+                disk_data = load_run_data(run_id)
+                for key in ("costs", "report", "structured_report", "editorial_feedback",
+                            "discovery", "verticals", "verification", "integration", "claude_synthesis",
+                            "gpt_synthesis", "stages", "manifest"):
+                    if key in disk_data:
+                        payload[key] = disk_data[key]
+            except Exception:
+                pass
+
+        return payload
 
     # Load from disk
     return load_run_data(run_id)
@@ -502,6 +728,99 @@ async def get_stage_output(run_id: str, stage: str):
         raise HTTPException(status_code=404, detail=f"Stage '{stage}' not found")
 
     return data["stages"][stage]
+
+
+@app.post("/runs/{run_id}/evidence")
+async def resolve_evidence(run_id: str, request: EvidenceRequest):
+    """Resolve evidence IDs to evidence cards or raw evidence metadata."""
+    run_dir = get_output_dir() / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    ids = [eid.strip() for eid in request.ids if eid and eid.strip()]
+    if not ids:
+        return {"items": []}
+
+    cards_map = _load_evidence_cards(run_dir)
+    items: list[dict[str, Any]] = []
+    missing: list[str] = []
+
+    for eid in ids:
+        card = cards_map.get(eid)
+        if card:
+            items.append({**card, "evidence_id": eid})
+        else:
+            missing.append(eid)
+
+    evidence_dir = run_dir / "evidence"
+    if missing and evidence_dir.exists():
+        store = EvidenceStore(evidence_dir)
+        await store.init()
+        try:
+            for eid in missing:
+                ev = await store.get(eid)
+                if ev:
+                    items.append({
+                        "evidence_id": eid,
+                        "url": ev.source_url,
+                        "title": ev.title,
+                        "snippet": ev.snippet,
+                        "published_date": ev.published_at.isoformat() if ev.published_at else None,
+                        "source": ev.source_url.split("/")[2] if ev.source_url else None,
+                        "type": "raw_evidence",
+                    })
+                else:
+                    items.append({
+                        "evidence_id": eid,
+                        "type": "missing",
+                    })
+        finally:
+            await store.close()
+    else:
+        for eid in missing:
+            items.append({
+                "evidence_id": eid,
+                "type": "missing",
+            })
+
+    return {"items": items}
+
+
+@app.post("/runs/{run_id}/discovery/review")
+async def save_discovery_review(run_id: str, request: DiscoveryReviewRequest):
+    """Persist discovery review edits for a paused run."""
+    run_dir = get_output_dir() / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    discovery = request.discovery or {}
+    allowed_keys = {
+        "official_segments",
+        "research_threads",
+        "research_groups",
+        "cross_cutting_themes",
+        "optionality_candidates",
+        "data_gaps",
+        "conflicting_signals",
+        "evidence_ids",
+        "thread_briefs",
+        "searches_performed",
+        "discovery_timestamp",
+    }
+
+    sanitized: dict[str, Any] = {k: discovery.get(k) for k in allowed_keys if k in discovery}
+
+    # Ensure required arrays exist
+    sanitized.setdefault("official_segments", [])
+    sanitized.setdefault("research_threads", [])
+    sanitized.setdefault("research_groups", [])
+
+    (run_dir / "stage2_discovery_review.json").write_text(json.dumps(sanitized, indent=2))
+
+    if request.notes is not None:
+        (run_dir / "stage2_discovery_review_notes.txt").write_text(request.notes)
+
+    return {"status": "ok"}
 
 
 @app.post("/runs/start")
@@ -544,6 +863,42 @@ async def cancel_run(run_id: str):
         session.task.cancel()
 
     return {"message": "Run cancelled", "run_id": run_id}
+
+
+@app.post("/runs/{run_id}/continue")
+async def continue_run(run_id: str, background_tasks: BackgroundTasks):
+    """Resume a paused run from checkpoints."""
+    run_dir = get_output_dir() / run_id
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    manifest = RunManifest.load(run_dir)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    if manifest.status in ("completed", "failed"):
+        raise HTTPException(status_code=400, detail="Run already finished")
+
+    if run_id in active_runs and active_runs[run_id].status == "running":
+        raise HTTPException(status_code=400, detail="Run is already running")
+
+    config_path = run_dir / "run_config.json"
+    if config_path.exists():
+        config_data = json.loads(config_path.read_text())
+    else:
+        config_data = {"ticker": manifest.ticker}
+
+    config_data["require_discovery_approval"] = False
+    config = RunConfig(**config_data)
+
+    session = RunSession(
+        run_id=run_id,
+        ticker=config.ticker,
+        config=config,
+    )
+    active_runs[run_id] = session
+
+    background_tasks.add_task(run_pipeline_with_events, session, True)
+    return {"message": "Run resumed", "run_id": run_id}
 
 
 @app.delete("/runs/{run_id}")
@@ -621,22 +976,22 @@ async def event_generator(run_id: str) -> AsyncGenerator[str, None]:
 
 # ============== Config/Prompt Endpoints ==============
 
-STAGE_AGENTS = [
-    {"stage": 1, "name": "DataOrchestrator", "model": "gpt-5.2", "file": "data_orchestrator.py",
+STAGE_AGENT_BLUEPRINTS = [
+    {"stage": 1, "name": "DataOrchestrator", "role": None, "file": "data_orchestrator.py",
      "description": "Fetches SEC filings, financials, news, and analyst data from FMP API"},
-    {"stage": 2, "name": "DiscoveryAgent", "model": "gpt-5.2", "file": "discovery.py",
+    {"stage": 2, "name": "DiscoveryAgent", "role": AgentRole.DISCOVERY, "file": "discovery.py",
      "description": "Internal discovery using 7 analytical lenses to identify value drivers"},
-    {"stage": 2, "name": "ExternalDiscoveryAgent", "model": "claude-sonnet-4", "file": "external_discovery.py",
-     "description": "External competitive intelligence with web search"},
-    {"stage": 3, "name": "VerticalAnalystAgent", "model": "gemini-2.0-flash-thinking-exp", "file": "vertical_analyst.py",
-     "description": "Deep research with Gemini's Deep Research capability"},
-    {"stage": 4, "name": "SynthesizerAgent (Claude)", "model": "claude-opus-4-5-20251101", "file": "synthesizer.py",
-     "description": "Synthesizes all research into investment thesis with extended thinking"},
-    {"stage": 4, "name": "SynthesizerAgent (GPT)", "model": "gpt-5.2", "file": "synthesizer.py",
-     "description": "Parallel synthesis for comparison"},
-    {"stage": 5, "name": "JudgeAgent", "model": "claude-opus-4-5-20251101", "file": "judge.py",
-     "description": "Compares both syntheses and produces editorial feedback"},
-    {"stage": 6, "name": "Revision", "model": "varies", "file": "synthesizer.py",
+    {"stage": 2, "name": "ExternalDiscoveryAgent (Light)", "role": AgentRole.WORKHORSE, "file": "external_discovery.py",
+     "description": "Market-wide competitive intelligence with web search"},
+    {"stage": 2, "name": "ExternalDiscoveryAgent (Anchored)", "role": AgentRole.WORKHORSE, "file": "external_discovery.py",
+     "description": "Company-anchored competitive intelligence with web search"},
+    {"stage": 3, "name": "VerticalAnalystAgent", "role": AgentRole.RESEARCH, "file": "vertical_analyst.py",
+     "description": "Deep research on each vertical using evidence cards"},
+    {"stage": 4, "name": "SynthesizerAgent", "role": AgentRole.SYNTHESIS, "file": "synthesizer.py",
+     "description": "Synthesizes all research into investment thesis"},
+    {"stage": 5, "name": "JudgeAgent", "role": AgentRole.JUDGE, "file": "judge.py",
+     "description": "Compares syntheses and produces editorial feedback"},
+    {"stage": 6, "name": "Revision", "role": AgentRole.SYNTHESIS, "file": "synthesizer.py",
      "description": "Winner revises based on judge feedback"},
 ]
 
@@ -644,7 +999,48 @@ STAGE_AGENTS = [
 @app.get("/config/agents")
 async def get_agents():
     """Get all agent configurations."""
-    return {"agents": STAGE_AGENTS}
+    settings = Settings()
+    router = LLMRouter(settings=settings)
+    agents = []
+    for blueprint in STAGE_AGENT_BLUEPRINTS:
+        role = blueprint.get("role")
+        model = "n/a"
+        provider = "n/a"
+        if role is not None:
+            model, provider = router._model_map[role][EscalationLevel.NORMAL]
+        agent = {
+            "stage": blueprint["stage"],
+            "name": blueprint["name"],
+            "model": model,
+            "provider": provider,
+            "file": blueprint["file"],
+            "description": blueprint["description"],
+        }
+        agents.append(agent)
+    return {"agents": agents}
+
+
+@app.get("/config/transcripts")
+async def get_transcript_index():
+    """List available local transcript folders."""
+    transcripts_root = ROOT / "transcripts"
+    tickers: dict[str, dict[str, Any]] = {}
+
+    if transcripts_root.exists():
+        for entry in transcripts_root.iterdir():
+            if not entry.is_dir():
+                continue
+            files = sorted([p.name for p in entry.glob("*.txt")])
+            if not files:
+                continue
+            relative_dir = str(entry.relative_to(ROOT))
+            tickers[entry.name.upper()] = {
+                "dir": relative_dir,
+                "count": len(files),
+                "files": files,
+            }
+
+    return {"root": str(transcripts_root), "tickers": tickers}
 
 
 @app.get("/config/prompts/{agent_file}")

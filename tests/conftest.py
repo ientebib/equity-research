@@ -31,7 +31,8 @@ def mock_env_vars() -> Generator[dict[str, str], None, None]:
         "SEC_USER_AGENT": "Test User test@example.com",
         "OPENAI_API_KEY": "sk-test-fake-openai-key-1234567890",
         "ANTHROPIC_API_KEY": "sk-ant-test-fake-anthropic-key",
-        "GEMINI_API_KEY": None,  # Not set
+        "GEMINI_API_KEY": "",  # Override any .env value
+        "PREFERRED_PROVIDER": "",  # Avoid forcing provider in tests
         "FMP_API_KEY": "test-fmp-key",
         "FINNHUB_API_KEY": None,
         "MAX_BUDGET_USD": "50.0",

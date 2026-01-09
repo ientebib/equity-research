@@ -19,7 +19,11 @@ from er.llm.router import LLMRouter
 from er.logging import get_logger
 from er.retrieval.evidence_cards import EvidenceCard, EvidenceCardGenerator
 from er.retrieval.fetch import FetchResult, WebFetcher
-from er.retrieval.search_provider import OpenAIWebSearchProvider, SearchResult
+from er.retrieval.search_provider import (
+    OpenAIWebSearchProvider,
+    GeminiWebSearchProvider,
+    SearchResult,
+)
 from er.workspace.store import WorkspaceStore
 
 logger = get_logger(__name__)
@@ -85,7 +89,11 @@ class WebResearchService:
         self.workspace_store = workspace_store
 
         # Initialize components
-        self.search_provider = OpenAIWebSearchProvider(llm_router)
+        preferred = getattr(llm_router, "preferred_provider", None)
+        if preferred == "google":
+            self.search_provider = GeminiWebSearchProvider(llm_router)
+        else:
+            self.search_provider = OpenAIWebSearchProvider(llm_router)
         self.fetcher = WebFetcher(evidence_store)
         self.card_generator = EvidenceCardGenerator(
             llm_router, evidence_store, workspace_store
@@ -135,6 +143,9 @@ class WebResearchService:
         )
 
         # Log search
+        provider_label = "openai_web_search"
+        if isinstance(self.search_provider, GeminiWebSearchProvider):
+            provider_label = "google_search"
         search_log = {
             "query": query,
             "max_results": max_results,
@@ -142,13 +153,14 @@ class WebResearchService:
             "domains": domains,
             "results_count": len(search_results),
             "urls": [r.url for r in search_results],
+            "provider": provider_label,
         }
         self._searches_performed.append(search_log)
 
         if self.workspace_store:
             self.workspace_store.log_search(
                 query=query,
-                provider="openai_web_search",
+                provider=provider_label,
                 results=[r.to_dict() for r in search_results],
             )
 

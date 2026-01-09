@@ -4,22 +4,25 @@ An AI-powered equity research platform that produces institutional-grade investm
 
 ## Overview
 
-This system automates the equity research process through a 6-stage pipeline that combines financial data collection, competitive intelligence, deep segment analysis, and dual synthesis to produce comprehensive investment reports with evidence-backed recommendations.
+This system automates the equity research process through a multi-stage pipeline that combines financial data collection, competitive intelligence, deep segment analysis, verification, and synthesis to produce investment reports with evidence-backed recommendations.
 
 ```text
 Stage 1: Data Collection → Financial statements, transcripts, market data
 Stage 2: Discovery       → Internal analysis + external competitive intelligence
 Stage 3: Deep Research   → Vertical analysts for each business segment
-Stage 4: Dual Synthesis  → Claude Opus + GPT-5.2 generate independent reports
+Stage 3.5: Verification  → Heuristic verification and fact ledger
+Stage 3.75: Integration  → Cross-vertical dynamics
+Stage 4: Dual Synthesis  → Claude + GPT syntheses
 Stage 5: Editorial       → Judge agent compares and selects best analysis
 Stage 6: Revision        → Final report with incorporated feedback
+Stage 7: Valuation       → DCF / reverse DCF artifacts (best-effort)
 ```
 
 ## Features
 
 - **Multi-Agent Architecture** - Specialized AI agents for different research tasks
-- **Multi-LLM Support** - Claude for reasoning, GPT for web search, Gemini for deep research
-- **Evidence Tracking** - All claims are cited with source URLs and content hashes
+- **Multi-LLM Support** - Provider routing with a preferred-provider override
+- **Evidence Tracking** - Evidence cards with URLs, snippets, and IDs stored per run
 - **Quant Metrics** - Pre-computed financial ratios, scores, and red flag detection
 - **Budget Management** - Hard limits on LLM spending per analysis run
 - **Resume Capability** - Checkpoint-based recovery for long-running analyses
@@ -104,19 +107,22 @@ er version
 | Stage | Agent | Purpose |
 |-------|-------|---------|
 | 1 | Data Orchestrator | Fetches financials, transcripts, market data from FMP |
-| 2A | Discovery | Internal analysis of business segments and drivers |
+| 2A | Discovery | Internal analysis of segments and drivers |
 | 2B | External Discovery | Competitive intelligence, analyst sentiment, news |
-| 2C | Discovery Merger | Merges findings, identifies variant perceptions |
-| 3 | Vertical Analysts | Deep research on individual business segments |
+| 2C | Discovery Merger | Merges findings and produces thread briefs |
+| 3 | Vertical Analysts | Deep research on each research vertical |
+| 3.5 | Verification | Heuristic verification + fact ledger |
+| 3.75 | Integration | Cross-vertical dynamics map |
 | 4 | Synthesizers | Two independent full reports (Claude + GPT) |
 | 5 | Judge | Editorial review, selects best synthesis |
 | 6 | Revision | Final polished report with feedback incorporated |
+| 7 | Valuation | DCF / reverse DCF artifacts (best-effort) |
 
 ### Data Sources
 
 - **FMP (Financial Modeling Prep)** - Financial statements, transcripts, analyst estimates
 - **Yahoo Finance** - Real-time market data and pricing
-- **Web Search** - News, competitor announcements, market discourse
+- **Web Search** - Provider-specific (OpenAI web_search or Gemini grounding)
 
 ### Quant Metrics
 
@@ -185,7 +191,7 @@ Each analysis run produces:
 
 - `report.md` - Final investment research report
 - `manifest.json` - Run metadata and configuration
-- Stage JSON files - Intermediate results from each pipeline stage
+- Stage JSON files - Intermediate results from each pipeline stage (including `stage2_external_discovery_light/anchored`)
 - `debug.log` - Detailed execution log
 
 Output is saved to `output/run_{TICKER}_{timestamp}/`.

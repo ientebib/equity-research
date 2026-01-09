@@ -10,7 +10,19 @@ import pytest
 
 from er.budget import BudgetTracker
 from er.llm.base import BudgetExceededError, LLMRequest, LLMResponse
+from er.config import Settings
 from er.llm.router import AgentRole, EscalationLevel, LLMRouter
+
+
+def make_settings() -> Settings:
+    return Settings(
+        _env_file=None,
+        SEC_USER_AGENT="Test User test@example.com",
+        OPENAI_API_KEY="sk-test-openai",
+        ANTHROPIC_API_KEY="sk-test-anthropic",
+        GEMINI_API_KEY="test-gemini",
+        PREFERRED_PROVIDER="",
+    )
 
 
 class TestRouterModelSelection:
@@ -18,7 +30,7 @@ class TestRouterModelSelection:
 
     def test_get_client_and_model_default_orchestration(self) -> None:
         """Test default model for orchestration role uses OpenAI."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
         client, model = router.get_client_and_model(AgentRole.ORCHESTRATION)
 
         # Model may vary based on config, but should be OpenAI
@@ -27,7 +39,7 @@ class TestRouterModelSelection:
 
     def test_get_client_and_model_judge_uses_opus(self) -> None:
         """Test judge role uses Claude Opus 4.5."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
         client, model = router.get_client_and_model(AgentRole.JUDGE)
 
         assert model == "claude-opus-4-5-20251101"
@@ -35,27 +47,27 @@ class TestRouterModelSelection:
 
     def test_get_client_and_model_research_normal(self) -> None:
         """Test research role at normal escalation uses Gemini."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
         client, model = router.get_client_and_model(
             AgentRole.RESEARCH, EscalationLevel.NORMAL
         )
 
-        assert model == "gemini-3-pro"
+        assert model == "gemini-2.5-pro"
         assert client.provider == "google"
 
     def test_get_client_and_model_research_elevated(self) -> None:
         """Test research role at elevated escalation uses GPT-5.2."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
         client, model = router.get_client_and_model(
             AgentRole.RESEARCH, EscalationLevel.ELEVATED
         )
 
-        assert model == "gpt-5.2"
+        assert model == "gpt-4o"
         assert client.provider == "openai"
 
     def test_get_client_and_model_synthesis(self) -> None:
         """Test synthesis role uses Claude Sonnet."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
         client, model = router.get_client_and_model(AgentRole.SYNTHESIS)
 
         assert model == "claude-sonnet-4-5-20250929"
@@ -63,7 +75,7 @@ class TestRouterModelSelection:
 
     def test_escalation_changes_model(self) -> None:
         """Test that escalation level changes model selection."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         # Decomposition at normal
         _, model_normal = router.get_client_and_model(
@@ -85,7 +97,7 @@ class TestRouterDryRun:
     @pytest.mark.asyncio
     async def test_dry_run_returns_response(self) -> None:
         """Test dry run mode returns a valid response."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         response = await router.complete(
             role=AgentRole.RESEARCH,
@@ -102,7 +114,7 @@ class TestRouterDryRun:
         """Test dry run response is valid JSON when structured output expected."""
         import orjson
 
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         response = await router.complete(
             role=AgentRole.RESEARCH,
@@ -117,7 +129,7 @@ class TestRouterDryRun:
     async def test_dry_run_tracks_budget(self) -> None:
         """Test dry run mode still tracks budget."""
         tracker = BudgetTracker(budget_limit=100.0)
-        router = LLMRouter(dry_run=True, budget_tracker=tracker)
+        router = LLMRouter(settings=make_settings(), dry_run=True, budget_tracker=tracker)
 
         await router.complete(
             role=AgentRole.RESEARCH,
@@ -130,7 +142,7 @@ class TestRouterDryRun:
     @pytest.mark.asyncio
     async def test_dry_run_different_responses_by_role(self) -> None:
         """Test dry run gives different responses for different roles."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         research_response = await router.complete(
             role=AgentRole.RESEARCH,
@@ -163,7 +175,7 @@ class TestRouterBudgetEnforcement:
             phase="test",
         )
 
-        router = LLMRouter(dry_run=True, budget_tracker=tracker)
+        router = LLMRouter(settings=make_settings(), dry_run=True, budget_tracker=tracker)
 
         with pytest.raises(BudgetExceededError):
             await router.complete(
@@ -175,7 +187,7 @@ class TestRouterBudgetEnforcement:
     async def test_within_budget_succeeds(self) -> None:
         """Test that requests within budget succeed."""
         tracker = BudgetTracker(budget_limit=100.0)
-        router = LLMRouter(dry_run=True, budget_tracker=tracker)
+        router = LLMRouter(settings=make_settings(), dry_run=True, budget_tracker=tracker)
 
         # Should not raise
         response = await router.complete(
@@ -192,7 +204,7 @@ class TestRouterForceProvider:
     @pytest.mark.asyncio
     async def test_force_provider(self) -> None:
         """Test forcing a specific provider."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         async with router.force_provider("anthropic"):
             client, model = router.get_client_and_model(AgentRole.ORCHESTRATION)
@@ -208,7 +220,7 @@ class TestAgentRole:
 
     def test_all_roles_have_mapping(self) -> None:
         """Test that all agent roles have model mappings."""
-        router = LLMRouter(dry_run=True)
+        router = LLMRouter(settings=make_settings(), dry_run=True)
 
         for role in AgentRole:
             for level in EscalationLevel:

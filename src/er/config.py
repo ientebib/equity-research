@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     )
     FINNHUB_API_KEY: str | None = Field(default=None, description="Finnhub API key")
 
+    # Provider preference
+    PREFERRED_PROVIDER: str | None = Field(
+        default=None,
+        description="Preferred LLM provider (openai|anthropic|google) to force all roles",
+    )
+
     # Budget and limits
     MAX_BUDGET_USD: float = Field(
         default=25.0, ge=0.0, description="Maximum budget per run in USD"
@@ -78,11 +84,11 @@ class Settings(BaseSettings):
 
     # Model defaults for different roles (2025 models)
     MODEL_WORKHORSE: str = Field(
-        default="gpt-5.2-mini",
+        default="gpt-4o-mini",
         description="Default model for workhorse tasks (fast, cheap)",
     )
     MODEL_RESEARCH: str = Field(
-        default="gemini-3-pro",
+        default="gemini-2.5-pro",
         description="Default model for research tasks (balanced)",
     )
     MODEL_JUDGE: str = Field(
@@ -113,6 +119,22 @@ class Settings(BaseSettings):
     def model_synthesis(self) -> str:
         """Get synthesis model (lowercase alias)."""
         return self.MODEL_SYNTHESIS
+
+    @property
+    def preferred_provider(self) -> str | None:
+        """Get preferred provider (normalized)."""
+        if not self.PREFERRED_PROVIDER:
+            return None
+        value = self.PREFERRED_PROVIDER.strip().lower()
+        if not value:
+            return None
+        if value == "google" and not self.gemini_api_key:
+            return None
+        if value == "openai" and not self.openai_api_key:
+            return None
+        if value == "anthropic" and not self.anthropic_api_key:
+            return None
+        return value
 
     @property
     def openai_api_key(self) -> str | None:
@@ -162,7 +184,7 @@ class Settings(BaseSettings):
         if self.ANTHROPIC_API_KEY:
             providers.append("anthropic")
         if self.GEMINI_API_KEY:
-            providers.append("gemini")
+            providers.append("google")
         return providers
 
     def ensure_directories(self) -> None:
@@ -202,6 +224,7 @@ class Settings(BaseSettings):
             "MODEL_RESEARCH": self.MODEL_RESEARCH,
             "MODEL_JUDGE": self.MODEL_JUDGE,
             "MODEL_SYNTHESIS": self.MODEL_SYNTHESIS,
+            "PREFERRED_PROVIDER": self.PREFERRED_PROVIDER,
         }
 
 

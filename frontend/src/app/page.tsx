@@ -1,12 +1,52 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { api, Run, StructuredReport, EditorialFeedback, CostBreakdown, Discovery, VerticalAnalysis, Synthesis, FinancialsData, IncomeStatement, NewsItem } from '@/lib/api';
-import ReactMarkdown from 'react-markdown';
+import { useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
+import { api, Run, StructuredReport, EditorialFeedback, CostBreakdown, Discovery, VerticalAnalysis, Synthesis, FinancialsData, NewsItem, EvidenceItem, StageEvent, LocalTranscriptsIndex } from '@/lib/api';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 type View = 'home' | 'archive' | 'running' | 'report';
-type ReportTab = 'report' | 'discovery' | 'verticals' | 'synthesis' | 'financials' | 'costs';
+type ReportTab = 'report' | 'discovery' | 'verticals' | 'synthesis' | 'financials' | 'costs' | 'sources';
+type ResearchThread = Discovery['research_threads'][number];
+type ResearchGroup = NonNullable<Discovery['research_groups']>[number];
+
+const TRANSCRIPT_TICKER_ALIASES: Record<string, string> = {
+  GOOG: 'GOOGL',
+};
+
+const PIPELINE_STAGES = [
+  { id: 1, name: 'Data Collection' },
+  { id: 2, name: 'Discovery' },
+  { id: 3, name: 'Deep Research' },
+  { id: 3.5, name: 'Verification' },
+  { id: 3.75, name: 'Integration' },
+  { id: 4, name: 'Synthesis' },
+  { id: 5, name: 'Judgment' },
+  { id: 6, name: 'Final Report' },
+];
+const PIPELINE_STAGE_IDS = PIPELINE_STAGES.map((stage) => stage.id);
+
+const resolveStagePosition = (stageValue?: number | null) => {
+  if (!stageValue) return 0;
+  const exactIndex = PIPELINE_STAGE_IDS.findIndex((id) => id === stageValue);
+  if (exactIndex >= 0) return exactIndex + 1;
+  let lastIndex = -1;
+  PIPELINE_STAGE_IDS.forEach((id, idx) => {
+    if (stageValue >= id) lastIndex = idx;
+  });
+  return lastIndex + 1;
+};
+
+const resolveStageLabel = (stageValue?: number | null) => {
+  if (!stageValue) return null;
+  const exactIndex = PIPELINE_STAGE_IDS.findIndex((id) => id === stageValue);
+  if (exactIndex >= 0) return PIPELINE_STAGES[exactIndex]?.name || null;
+  let lastIndex = -1;
+  PIPELINE_STAGE_IDS.forEach((id, idx) => {
+    if (stageValue >= id) lastIndex = idx;
+  });
+  return lastIndex >= 0 ? PIPELINE_STAGES[lastIndex]?.name || null : null;
+};
 
 interface DisplayRun {
   id: string;
@@ -73,7 +113,6 @@ function VerdictHero({ verdict, confidence, conviction }: { verdict: string; con
   const v = verdict.toUpperCase();
   const isBuy = v === 'BUY';
   const isSell = v === 'SELL';
-  const isHold = v === 'HOLD';
 
   const colorClass = isBuy ? 'positive' : isSell ? 'negative' : 'warning';
   const textColorClass = isBuy ? 'text-[var(--positive)]' : isSell ? 'text-[var(--negative)]' : 'text-[var(--warning)]';
@@ -143,124 +182,1042 @@ function TabButton({ active, onClick, children, count }: {
 
 // Thread type labels with descriptions
 const THREAD_TYPE_INFO: Record<string, { label: string; description: string }> = {
-  segment: { label: 'Segment Analysis', description: 'Official business segments' },
-  cross_cutting: { label: 'Cross-Cutting Themes', description: 'Themes that span multiple segments' },
-  optionality: { label: 'Hidden Optionality', description: 'Underappreciated value drivers' },
+  segment: { label: 'Core Segments', description: 'Official reporting lines' },
+  cross_cutting: { label: 'Cross-Segment Themes', description: 'Themes that span segments' },
+  optionality: { label: 'Optionality Bets', description: 'Upside bets outside core segments' },
 };
 
-function ThreadTypeSection({ type, threads }: { type: string; threads: any[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+const THREAD_TYPE_TAGS: Record<string, string> = {
+  segment: 'Segment',
+  cross_cutting: 'Cross-segment',
+  optionality: 'Optionality',
+};
+
+const formatThreadName = (name: string) => name.replace(/^\[EXT\]\s*/i, '').trim();
+
+const isExternalThread = (thread: ResearchThread) =>
+  thread.discovery_lens === 'external_discovery' || /^\[EXT\]/i.test(thread.name || '');
+
+function ThreadBadge({
+  children,
+  tone = 'muted',
+  title,
+}: {
+  children: React.ReactNode;
+  tone?: 'muted' | 'accent' | 'neutral';
+  title?: string;
+}) {
+  const toneClass = tone === 'accent'
+    ? 'border-[var(--accent)] text-[var(--accent)] bg-[var(--accent-muted)]'
+    : tone === 'neutral'
+      ? 'border-[var(--border-subtle)] text-[var(--text-secondary)] bg-[var(--bg-elevated)]'
+      : 'border-[var(--border-subtle)] text-[var(--text-muted)] bg-[var(--bg-surface)]';
+
+  return (
+    <span
+      className={`px-2 py-1 text-[10px] font-mono uppercase tracking-wider border rounded ${toneClass}`}
+      title={title}
+    >
+      {children}
+    </span>
+  );
+}
+
+function ThreadCard({
+  thread,
+  index,
+  editable,
+  excludedIds,
+  onToggleExclude,
+  onUpdateThread,
+  brief,
+  groupName,
+  groupIndex,
+}: {
+  thread: ResearchThread;
+  index: number;
+  editable?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExclude?: (threadId: string) => void;
+  onUpdateThread?: (threadId: string, patch: Partial<ResearchThread>) => void;
+  brief?: Record<string, unknown>;
+  groupName?: string;
+  groupIndex?: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [newQuestion, setNewQuestion] = useState('');
+  const displayName = formatThreadName(thread.name || 'Untitled');
+  const questionCount = thread.research_questions?.length || 0;
+  const previewQuestions = !expanded ? (thread.research_questions || []).slice(0, 2) : [];
+  const external = isExternalThread(thread);
+  const typeTag = THREAD_TYPE_TAGS[thread.thread_type] || 'Research';
+  const groupLabel = groupIndex !== undefined ? `Group ${String.fromCharCode(65 + groupIndex)}` : null;
+
+  const metaParts = [
+    `${questionCount} questions`,
+    thread.priority ? `Priority ${thread.priority}` : null,
+    thread.official_segment_name ? `Segment: ${thread.official_segment_name}` : null,
+    groupName ? `Group: ${groupName}` : null,
+  ].filter(Boolean);
+
+  const updateQuestion = (qIndex: number, value: string) => {
+    if (!onUpdateThread) return;
+    const next = [...(thread.research_questions || [])];
+    next[qIndex] = value;
+    onUpdateThread(thread.thread_id, { research_questions: next });
+  };
+
+  const removeQuestion = (qIndex: number) => {
+    if (!onUpdateThread) return;
+    const next = [...(thread.research_questions || [])];
+    next.splice(qIndex, 1);
+    onUpdateThread(thread.thread_id, { research_questions: next });
+  };
+
+  const addQuestion = () => {
+    if (!onUpdateThread) return;
+    const value = newQuestion.trim();
+    if (!value) return;
+    const next = [...(thread.research_questions || []), value];
+    onUpdateThread(thread.thread_id, { research_questions: next });
+    setNewQuestion('');
+  };
+
+  return (
+    <div className={`rounded-lg overflow-hidden border border-[var(--border-subtle)] ${
+      excludedIds?.has(thread.thread_id) ? 'opacity-60' : ''
+    }`}>
+      <div className={`w-full px-4 py-3 flex items-start gap-3 transition-all ${
+        expanded ? 'bg-[var(--bg-elevated)]' : 'hover:bg-[var(--bg-elevated)]'
+      }`}>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex-1 text-left flex items-start gap-3"
+        >
+          <span className="text-xs font-mono text-[var(--accent)] mt-0.5 shrink-0">
+            {String(index + 1).padStart(2, '0')}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium text-[var(--text-primary)] truncate">{displayName}</div>
+            <div className="mt-1 flex flex-wrap gap-2 items-center">
+              <ThreadBadge tone="neutral">{typeTag}</ThreadBadge>
+              {thread.is_official_segment && <ThreadBadge tone="neutral">Official Segment</ThreadBadge>}
+              {external && <ThreadBadge tone="accent">External Scan</ThreadBadge>}
+              {groupLabel && (
+                <ThreadBadge tone="neutral" title={groupName}>
+                  {groupLabel}
+                </ThreadBadge>
+              )}
+            </div>
+            {metaParts.length > 0 && (
+              <div className="text-xs text-[var(--text-muted)] mt-2">
+                {metaParts.join(' · ')}
+              </div>
+            )}
+            {!expanded && previewQuestions.length > 0 && (
+              <div className="mt-2 space-y-1 text-xs text-[var(--text-ghost)]">
+                {previewQuestions.map((q, qi) => (
+                  <div key={qi} className="flex gap-2">
+                    <span className="text-[var(--accent)]">→</span>
+                    <span className="truncate">{q}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </button>
+        {editable && excludedIds && onToggleExclude && (
+          <label className="flex items-center gap-2 text-xs font-mono text-[var(--text-muted)]">
+            <input
+              type="checkbox"
+              checked={!excludedIds.has(thread.thread_id)}
+              onChange={() => onToggleExclude(thread.thread_id)}
+            />
+            Include
+          </label>
+        )}
+        {editable && onUpdateThread && (
+          <button
+            onClick={() => setEditing(!editing)}
+            className="text-xs font-mono uppercase text-[var(--accent)] border border-[var(--accent)] px-2 py-1 rounded bg-[var(--accent-muted)]"
+          >
+            {editing ? 'Done' : 'Edit'}
+          </button>
+        )}
+        <span className="text-[var(--text-ghost)] text-sm shrink-0">
+          {expanded ? '−' : '+'}
+        </span>
+      </div>
+
+      {expanded && (
+        <div className="px-4 pb-4 bg-[var(--bg-elevated)] border-t border-[var(--border-subtle)]">
+          <div className="pt-4 pl-8 space-y-4">
+            {thread.description && (
+              <div>
+                <div className="text-label mb-2">DESCRIPTION</div>
+                {editable && editing && onUpdateThread ? (
+                  <textarea
+                    value={thread.description}
+                    onChange={(e) => onUpdateThread(thread.thread_id, { description: e.target.value })}
+                    rows={3}
+                    className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                  />
+                ) : (
+                  <p className="text-sm text-[var(--text-secondary)]">{thread.description}</p>
+                )}
+              </div>
+            )}
+
+            {thread.value_driver_hypothesis && (
+              <div>
+                <div className="text-label mb-2">HYPOTHESIS</div>
+                {editable && editing && onUpdateThread ? (
+                  <textarea
+                    value={thread.value_driver_hypothesis}
+                    onChange={(e) => onUpdateThread(thread.thread_id, { value_driver_hypothesis: e.target.value })}
+                    rows={2}
+                    className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                  />
+                ) : (
+                  <p className="text-sm text-[var(--text-secondary)]">{thread.value_driver_hypothesis}</p>
+                )}
+              </div>
+            )}
+
+            {((thread.research_questions && thread.research_questions.length > 0) || (editable && editing)) && (
+              <div>
+                <div className="text-label mb-2">QUESTIONS (TO BE ANSWERED)</div>
+                {editable && editing && onUpdateThread ? (
+                  <div className="space-y-3">
+                    {(thread.research_questions || []).map((q: string, qi: number) => (
+                      <div key={qi} className="flex gap-2 items-start">
+                        <textarea
+                          value={q}
+                          onChange={(e) => updateQuestion(qi, e.target.value)}
+                          rows={2}
+                          className="flex-1 bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                        />
+                        <button
+                          onClick={() => removeQuestion(qi)}
+                          className="text-[10px] font-mono uppercase text-[var(--negative)] border border-[var(--border-subtle)] px-2 py-1 rounded"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                    <div className="flex gap-2 items-start">
+                      <textarea
+                        value={newQuestion}
+                        onChange={(e) => setNewQuestion(e.target.value)}
+                        rows={2}
+                        placeholder="Add a new question"
+                        className="flex-1 bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                      />
+                      <button
+                        onClick={addQuestion}
+                        className="text-[10px] font-mono uppercase text-[var(--accent)] border border-[var(--accent)] px-2 py-1 rounded bg-[var(--accent-muted)]"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {thread.research_questions.map((q: string, qi: number) => (
+                      <div key={qi} className="flex gap-2 text-sm">
+                        <span className="text-[var(--accent)] shrink-0">→</span>
+                        <span className="text-[var(--text-secondary)]">{q}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {editable && editing && onUpdateThread && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-label mb-2">PRIORITY</div>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={thread.priority}
+                    onChange={(e) => onUpdateThread(thread.thread_id, { priority: Number(e.target.value) })}
+                    className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                  />
+                  <div className="mt-1 text-[10px] text-[var(--text-ghost)]">1 = highest priority</div>
+                </div>
+                <div>
+                  <div className="text-label mb-2">CATEGORY</div>
+                  <select
+                    value={thread.thread_type}
+                    onChange={(e) => onUpdateThread(thread.thread_id, { thread_type: e.target.value })}
+                    className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                  >
+                    <option value="segment">Segment (reported business line)</option>
+                    <option value="cross_cutting">Cross-cutting (spans segments)</option>
+                    <option value="optionality">Optionality (upside bet)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {brief && (
+              <div className="space-y-3">
+                {brief?.rationale && (
+                  <div>
+                    <div className="text-label mb-2">RATIONALE</div>
+                    <p className="text-sm text-[var(--text-secondary)]">
+                      {String(brief?.rationale)}
+                    </p>
+                  </div>
+                )}
+                {Array.isArray(brief?.recent_developments) && (
+                  <div>
+                    <div className="text-label mb-2">RECENT DEVELOPMENTS</div>
+                    <ul className="space-y-2 text-sm text-[var(--text-secondary)]">
+                      {(brief?.recent_developments as string[]).map((item, idx) => (
+                        <li key={idx} className="flex gap-2">
+                          <span className="text-[var(--accent)]">•</span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {Array.isArray(brief?.recency_questions) && (
+                  <div>
+                    <div className="text-label mb-2">RECENCY QUESTIONS</div>
+                    <ul className="space-y-2 text-sm text-[var(--text-secondary)]">
+                      {(brief?.recency_questions as string[]).map((item, idx) => (
+                        <li key={idx} className="flex gap-2">
+                          <span className="text-[var(--accent)]">•</span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResearchGroupSection({
+  group,
+  threads,
+  defaultExpanded,
+  groupIndex,
+  editable,
+  excludedIds,
+  onToggleExclude,
+  onUpdateThread,
+  onUpdateGroup,
+  briefMap,
+}: {
+  group: ResearchGroup;
+  threads: ResearchThread[];
+  defaultExpanded?: boolean;
+  groupIndex?: number;
+  editable?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExclude?: (threadId: string) => void;
+  onUpdateThread?: (threadId: string, patch: Partial<ResearchThread>) => void;
+  onUpdateGroup?: (groupId: string, patch: Partial<ResearchGroup>) => void;
+  briefMap?: Record<string, Record<string, unknown>>;
+}) {
+  const [expanded, setExpanded] = useState(Boolean(defaultExpanded));
+  const questionCount = threads.reduce((sum, t) => sum + (t.research_questions?.length || 0), 0);
+  const externalCount = threads.filter(isExternalThread).length;
+  const agentLabel = groupIndex !== undefined ? `Deep Research Agent ${String.fromCharCode(65 + groupIndex)}` : 'Deep Research Agent';
+
+  return (
+    <div className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-4 py-4 text-left flex items-start justify-between gap-4 hover:bg-[var(--bg-elevated)] transition-colors"
+      >
+        <div>
+          <div className="text-sm font-medium text-[var(--text-primary)]">{group.name}</div>
+          <div className="text-xs text-[var(--text-muted)] mt-1">{group.theme}</div>
+          {group.focus && (
+            <div className="text-xs text-[var(--text-ghost)] mt-2">{group.focus}</div>
+          )}
+          <div className="mt-3">
+            <ThreadBadge tone="neutral" title={group.name}>{agentLabel}</ThreadBadge>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-xs font-mono text-[var(--text-muted)]">
+            {threads.length} threads · {questionCount} questions
+          </div>
+          {externalCount > 0 && (
+            <div className="text-[10px] font-mono text-[var(--accent)] mt-1">
+              {externalCount} external scans
+            </div>
+          )}
+          <div className="text-[var(--text-ghost)] text-sm mt-1">{expanded ? '−' : '+'}</div>
+        </div>
+      </button>
+      {expanded && (
+        <div className="px-4 pb-4 border-t border-[var(--border-subtle)]">
+          {group.key_questions && group.key_questions.length > 0 && (
+            <div className="pt-4 pb-2">
+              <div className="text-label mb-2">GROUP QUESTIONS</div>
+              <ul className="space-y-2 text-sm text-[var(--text-secondary)]">
+                {group.key_questions.map((q, idx) => (
+                  <li key={idx} className="flex gap-2">
+                    <span className="text-[var(--accent)]">→</span>
+                    <span>{q}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(editable || group.review_guidance) && (
+            <div className="pt-4">
+              <div className="text-label mb-2">GUIDANCE FOR THIS GROUP</div>
+              <div className="text-[11px] text-[var(--text-ghost)] mb-2">
+                This guidance is appended to the deep research prompt for this group only.
+              </div>
+              {editable && onUpdateGroup ? (
+                <textarea
+                  value={group.review_guidance || ''}
+                  onChange={(e) => onUpdateGroup(group.group_id, { review_guidance: e.target.value })}
+                  rows={3}
+                  placeholder="Example: Focus on Waymo unit economics and TPU external sales; skip legacy Android margins."
+                  className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                />
+              ) : (
+                <p className="text-sm text-[var(--text-secondary)]">{group.review_guidance}</p>
+              )}
+            </div>
+          )}
+          <div className="pt-4 space-y-2">
+            {threads.map((thread, i) => (
+              <ThreadCard
+                key={thread.thread_id}
+                thread={thread}
+                index={i}
+                groupName={group.name}
+                groupIndex={groupIndex}
+                editable={editable}
+                excludedIds={excludedIds}
+                onToggleExclude={onToggleExclude}
+                onUpdateThread={onUpdateThread}
+                brief={briefMap?.[thread.thread_id]}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SegmentSection({
+  segmentName,
+  threads,
+  defaultExpanded,
+  editable,
+  excludedIds,
+  onToggleExclude,
+  onUpdateThread,
+  groupByThread,
+  briefMap,
+}: {
+  segmentName: string;
+  threads: ResearchThread[];
+  defaultExpanded?: boolean;
+  editable?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExclude?: (threadId: string) => void;
+  onUpdateThread?: (threadId: string, patch: Partial<ResearchThread>) => void;
+  groupByThread?: Record<string, { name: string; index: number }>;
+  briefMap?: Record<string, Record<string, unknown>>;
+}) {
+  const [expanded, setExpanded] = useState(Boolean(defaultExpanded));
+  const questionCount = threads.reduce((sum, t) => sum + (t.research_questions?.length || 0), 0);
+
+  return (
+    <div className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-4 py-4 text-left flex items-start justify-between gap-4 hover:bg-[var(--bg-elevated)] transition-colors"
+      >
+        <div>
+          <div className="text-sm font-medium text-[var(--text-primary)]">{segmentName}</div>
+          <div className="text-xs text-[var(--text-muted)] mt-1">Reporting segment</div>
+        </div>
+        <div className="text-right">
+          <div className="text-xs font-mono text-[var(--text-muted)]">
+            {threads.length} threads · {questionCount} questions
+          </div>
+          <div className="text-[var(--text-ghost)] text-sm mt-1">{expanded ? '−' : '+'}</div>
+        </div>
+      </button>
+      {expanded && (
+        <div className="px-4 pb-4 border-t border-[var(--border-subtle)]">
+          <div className="pt-4 space-y-2">
+            {threads.map((thread, i) => (
+              <ThreadCard
+                key={thread.thread_id}
+                thread={thread}
+                index={i}
+                groupName={groupByThread?.[thread.thread_id]?.name}
+                groupIndex={groupByThread?.[thread.thread_id]?.index}
+                editable={editable}
+                excludedIds={excludedIds}
+                onToggleExclude={onToggleExclude}
+                onUpdateThread={onUpdateThread}
+                brief={briefMap?.[thread.thread_id]}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchPlanSection({
+  discovery,
+}: {
+  discovery?: Discovery;
+}) {
+  const searches = discovery?.searches;
+  const [expanded, setExpanded] = useState(false);
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({});
+  const segments = (discovery?.official_segments || []).filter(Boolean);
+  const defaultView: 'segments' | 'sources' = segments.length > 0 ? 'segments' : 'sources';
+  const [viewMode, setViewMode] = useState<'segments' | 'sources'>(defaultView);
+
+  useEffect(() => {
+    if (segments.length === 0 && viewMode === 'segments') {
+      setViewMode('sources');
+    }
+  }, [segments.length, viewMode]);
+
+  const searchGroups = [
+    {
+      key: 'internal',
+      label: 'Internal Discovery (company + filings)',
+      description: 'Searches grounded in company context and official sources.',
+      items: searches?.internal || [],
+    },
+    {
+      key: 'external_light',
+      label: 'External Scan (market-wide)',
+      description: 'Broad market scan without ticker anchoring.',
+      items: searches?.external_light || [],
+    },
+    {
+      key: 'external_anchored',
+      label: 'External Scan (company-anchored)',
+      description: 'Focused scan with ticker anchoring for recent changes.',
+      items: searches?.external_anchored || [],
+    },
+  ].filter((group) => group.items.length > 0);
+
+  const totalQueries = searchGroups.reduce((sum, group) => sum + group.items.length, 0);
+  if (!searches || totalQueries === 0) {
+    return (
+      <div className="mb-10 p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)] text-xs text-[var(--text-ghost)]">
+        No web searches recorded yet. If this persists, check provider keys or network access.
+      </div>
+    );
+  }
+
+  const stopwords = new Set([
+    'and', 'or', 'the', 'of', 'to', 'for', 'other', 'segment', 'segments',
+    'business', 'services', 'service', 'products', 'product', 'co', 'corp',
+    'corporation', 'company', 'inc', 'ltd', 'group',
+  ]);
+
+  const tokenize = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(' ')
+      .map((token) => token.trim())
+      .filter((token) => token && !stopwords.has(token));
+
+  const segmentTokens = segments.map((segment) => ({
+    name: segment,
+    tokens: tokenize(segment),
+  }));
+
+  const assignSegment = (query: string) => {
+    if (!segments.length) return 'Cross-cutting';
+    const tokens = tokenize(query);
+    let bestScore = 0;
+    let bestSegment = 'Cross-cutting';
+    for (const segment of segmentTokens) {
+      if (!segment.tokens.length) continue;
+      const overlap = segment.tokens.filter((token) => tokens.includes(token)).length;
+      if (overlap > bestScore) {
+        bestScore = overlap;
+        bestSegment = segment.name;
+      }
+    }
+    return bestScore > 0 ? bestSegment : 'Cross-cutting';
+  };
+
+  const renderSearchItem = (item: Record<string, unknown>, index: number) => {
+    const query = String(item.query || item['query'] || '').trim();
+    if (!query) return null;
+    const keyFinding = item['key_finding'] ? String(item['key_finding']) : '';
+    const cards = typeof item['cards_generated'] === 'number' ? item['cards_generated'] : null;
+    const hasUrls = Array.isArray(item['urls_found']);
+    const urls = hasUrls ? (item['urls_found'] as Array<unknown>).filter(Boolean) : [];
+    const provider = typeof item['provider'] === 'string' ? item['provider'] : '';
+    const lens = typeof item['lens'] === 'string' ? item['lens'] : '';
+    const sourceLabel = typeof item['source_label'] === 'string' ? item['source_label'] : '';
+
+    return (
+      <div key={`${query}-${index}`} className="search-item">
+        <div className="search-item-main">
+          <div className="search-item-query">{query}</div>
+          {keyFinding && (
+            <div className="search-item-finding">{keyFinding}</div>
+          )}
+        </div>
+        <div className="search-item-meta">
+          {lens && (
+            <span className="search-chip">Lens: {lens.replace(/_/g, ' ')}</span>
+          )}
+          {cards !== null && (
+            <span className={`search-chip ${cards === 0 ? 'empty' : ''}`}>Cards: {cards}</span>
+          )}
+          {hasUrls && <span className="search-chip">URLs: {urls.length}</span>}
+          {provider && <span className="search-chip">{provider}</span>}
+          {sourceLabel && <span className="search-chip">{sourceLabel}</span>}
+        </div>
+      </div>
+    );
+  };
+
+  const allItems = searchGroups.flatMap((group) =>
+    group.items.map((item) => ({
+      item: {
+        ...item,
+        source_label: group.label,
+      },
+      segment: assignSegment(String(item.query || item['query'] || '')),
+      sourceKey: group.key,
+      sourceLabel: group.label,
+    }))
+  );
+
+  const segmentBuckets = allItems.reduce((acc, entry) => {
+    const bucket = acc.get(entry.segment) || [];
+    bucket.push(entry);
+    acc.set(entry.segment, bucket);
+    return acc;
+  }, new Map<string, typeof allItems>());
+
+  const orderedSegments = [...segments, 'Cross-cutting'];
+
+  return (
+    <div className="mb-10 search-plan">
+      <div className="search-plan-header">
+        <div>
+          <div className="text-label">SEARCH PLAN</div>
+          <div className="text-[11px] text-[var(--text-ghost)]">
+            These queries drive evidence cards for deep research. Review for coverage and recency.
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {segments.length > 0 && (
+            <button
+              onClick={() => setViewMode('segments')}
+              className={`search-toggle ${viewMode === 'segments' ? 'active' : ''}`}
+            >
+              By Segment
+            </button>
+          )}
+          <button
+            onClick={() => setViewMode('sources')}
+            className={`search-toggle ${viewMode === 'sources' ? 'active' : ''}`}
+          >
+            By Source
+          </button>
+          <button
+            onClick={() => setExpanded((prev) => !prev)}
+            className="px-3 py-1.5 text-xs font-mono uppercase border border-[var(--border-subtle)] rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-default)]"
+          >
+            {expanded ? 'Collapse' : 'Expand'}
+          </button>
+        </div>
+      </div>
+
+      <div className="search-summary">
+        {searchGroups.map((group) => (
+          <div key={group.key} className="search-summary-card">
+            <div className="search-summary-label">{group.label}</div>
+            <div className="search-summary-value">{group.items.length}</div>
+          </div>
+        ))}
+        <div className="search-summary-card accent">
+          <div className="search-summary-label">Total Queries</div>
+          <div className="search-summary-value">{totalQueries}</div>
+        </div>
+      </div>
+
+      {expanded && viewMode === 'segments' && (
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {orderedSegments.map((segment) => {
+            const entries = segmentBuckets.get(segment) || [];
+            if (entries.length === 0) {
+              if (segment === 'Cross-cutting') return null;
+              return (
+                <div key={segment} className="search-group-card">
+                  <div className="search-group-header">
+                    <div>
+                      <div className="search-group-title">{segment}</div>
+                      <div className="search-group-meta">No queries yet</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            const key = `segment-${segment}`;
+            const showAllSegment = showAll[key];
+            const visible = showAllSegment ? entries : entries.slice(0, 5);
+            return (
+              <div key={segment} className="search-group-card">
+                <div className="search-group-header">
+                  <div>
+                    <div className="search-group-title">{segment}</div>
+                    <div className="search-group-meta">{entries.length} queries</div>
+                  </div>
+                </div>
+                <div className="search-items">
+                  {visible.map((entry, idx) => renderSearchItem(entry.item, idx))}
+                </div>
+                {entries.length > visible.length && (
+                  <button
+                    onClick={() => setShowAll((prev) => ({ ...prev, [key]: true }))}
+                    className="mt-3 text-xs font-mono uppercase text-[var(--accent)]"
+                  >
+                    Show all queries
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {expanded && viewMode === 'sources' && (
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {searchGroups.map((group) => {
+            const showAllGroup = showAll[group.key];
+            const visibleItems = showAllGroup ? group.items : group.items.slice(0, 6);
+            return (
+              <div key={group.key} className="search-group-card">
+                <div className="search-group-header">
+                  <div>
+                    <div className="search-group-title">{group.label}</div>
+                    <div className="search-group-meta">{group.description}</div>
+                  </div>
+                  <div className="search-group-count">{group.items.length}</div>
+                </div>
+                <div className="search-items">
+                  {visibleItems.map(renderSearchItem)}
+                </div>
+                {group.items.length > visibleItems.length && (
+                  <button
+                    onClick={() => setShowAll((prev) => ({ ...prev, [group.key]: true }))}
+                    className="mt-3 text-xs font-mono uppercase text-[var(--accent)]"
+                  >
+                    Show all queries
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EditableList({
+  items,
+  editable,
+  onChange,
+  placeholder,
+}: {
+  items: string[];
+  editable?: boolean;
+  onChange?: (items: string[]) => void;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState('');
+
+  const updateItem = (index: number, value: string) => {
+    if (!onChange) return;
+    const next = [...items];
+    next[index] = value;
+    onChange(next);
+  };
+
+  const removeItem = (index: number) => {
+    if (!onChange) return;
+    const next = [...items];
+    next.splice(index, 1);
+    onChange(next);
+  };
+
+  const addItem = () => {
+    if (!onChange) return;
+    const value = draft.trim();
+    if (!value) return;
+    onChange([...items, value]);
+    setDraft('');
+  };
+
+  if (!editable) {
+    return (
+      <div className="space-y-2">
+        {items.map((item, idx) => (
+          <div key={idx} className="p-3 border border-[var(--border-subtle)] rounded bg-[var(--bg-elevated)] text-sm text-[var(--text-secondary)]">
+            {item}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {items.map((item, idx) => (
+        <div key={idx} className="flex gap-2 items-start">
+          <textarea
+            value={item}
+            onChange={(e) => updateItem(idx, e.target.value)}
+            rows={2}
+            className="flex-1 bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+          />
+          <button
+            onClick={() => removeItem(idx)}
+            className="text-[10px] font-mono uppercase text-[var(--negative)] border border-[var(--border-subtle)] px-2 py-1 rounded"
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div className="flex gap-2 items-start">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={2}
+          placeholder={placeholder || 'Add item'}
+          className="flex-1 bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+        />
+        <button
+          onClick={addItem}
+          className="text-[10px] font-mono uppercase text-[var(--accent)] border border-[var(--accent)] px-2 py-1 rounded bg-[var(--accent-muted)]"
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ThreadTypeSection({
+  type,
+  threads,
+  editable,
+  excludedIds,
+  onToggleExclude,
+  onUpdateThread,
+  groupByThread,
+  briefMap,
+}: {
+  type: string;
+  threads: ResearchThread[];
+  editable?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExclude?: (threadId: string) => void;
+  onUpdateThread?: (threadId: string, patch: Partial<ResearchThread>) => void;
+  groupByThread?: Record<string, { name: string; index: number }>;
+  briefMap?: Record<string, Record<string, unknown>>;
+}) {
   const info = THREAD_TYPE_INFO[type] || { label: type, description: '' };
 
   return (
     <div className="mb-8">
       <div className="flex items-baseline gap-3 mb-4 pb-3 border-b border-[var(--border-subtle)]">
         <h3 className="text-sm font-mono uppercase tracking-wider text-[var(--text-primary)]">{info.label}</h3>
+        {info.description && (
+          <span className="text-xs text-[var(--text-ghost)]">{info.description}</span>
+        )}
         <span className="text-xs text-[var(--text-ghost)]">{threads.length} threads</span>
       </div>
 
-      <div className="space-y-1">
+      <div className="space-y-2">
         {threads.map((thread, i) => (
-          <div key={thread.thread_id || i} className="rounded-lg overflow-hidden">
-            <button
-              onClick={() => setExpanded(expanded === thread.thread_id ? null : thread.thread_id)}
-              className={`w-full text-left px-4 py-3 flex items-start gap-3 transition-all ${
-                expanded === thread.thread_id
-                  ? 'bg-[var(--bg-elevated)]'
-                  : 'hover:bg-[var(--bg-elevated)]'
-              }`}
-            >
-              <span className="text-xs font-mono text-[var(--accent)] mt-0.5 shrink-0">
-                {String(i + 1).padStart(2, '0')}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-[var(--text-primary)] truncate">{thread.name}</div>
-                <div className="text-xs text-[var(--text-muted)] mt-1">
-                  {thread.research_questions?.length || 0} questions · Priority {thread.priority}
-                </div>
-              </div>
-              <span className="text-[var(--text-ghost)] text-sm shrink-0">
-                {expanded === thread.thread_id ? '−' : '+'}
-              </span>
-            </button>
-
-            {expanded === thread.thread_id && (
-              <div className="px-4 pb-4 bg-[var(--bg-elevated)] border-t border-[var(--border-subtle)]">
-                <div className="pt-4 pl-8 space-y-4">
-                  {thread.value_driver_hypothesis && (
-                    <div>
-                      <div className="text-label mb-2">HYPOTHESIS</div>
-                      <p className="text-sm text-[var(--text-secondary)]">{thread.value_driver_hypothesis}</p>
-                    </div>
-                  )}
-
-                  {thread.research_questions && thread.research_questions.length > 0 && (
-                    <div>
-                      <div className="text-label mb-2">QUESTIONS ASKED</div>
-                      <div className="space-y-2">
-                        {thread.research_questions.map((q: string, qi: number) => (
-                          <div key={qi} className="flex gap-2 text-sm">
-                            <span className="text-[var(--accent)] shrink-0">→</span>
-                            <span className="text-[var(--text-secondary)]">{q}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
+          <ThreadCard
+            key={thread.thread_id || i}
+            thread={thread}
+            index={i}
+            groupName={groupByThread?.[thread.thread_id]?.name}
+            groupIndex={groupByThread?.[thread.thread_id]?.index}
+            editable={editable}
+            excludedIds={excludedIds}
+            onToggleExclude={onToggleExclude}
+            onUpdateThread={onUpdateThread}
+            brief={briefMap?.[thread.thread_id]}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function DiscoveryView({ discovery }: { discovery: Discovery }) {
-  // Group threads by type
-  const grouped = discovery.research_threads?.reduce((acc, thread) => {
+function DiscoveryView({
+  discovery,
+  editable,
+  excludedIds,
+  onToggleExclude,
+  onUpdateThread,
+  onUpdateGroup,
+  onUpdateDiscovery,
+  briefMap,
+}: {
+  discovery: Discovery;
+  editable?: boolean;
+  excludedIds?: Set<string>;
+  onToggleExclude?: (threadId: string) => void;
+  onUpdateThread?: (threadId: string, patch: Partial<ResearchThread>) => void;
+  onUpdateGroup?: (groupId: string, patch: Partial<ResearchGroup>) => void;
+  onUpdateDiscovery?: (field: keyof Discovery, value: unknown) => void;
+  briefMap?: Record<string, Record<string, unknown>>;
+}) {
+  const threads = discovery.research_threads || [];
+  const totalQuestions = threads.reduce((sum, t) => sum + (t.research_questions?.length || 0), 0);
+  const externalCount = threads.filter(isExternalThread).length;
+  const hasGroups = (discovery.research_groups?.length || 0) > 0;
+  const hasSegments = (discovery.official_segments?.length || 0) > 0;
+  const defaultPlanView: 'groups' | 'types' | 'segments' = hasSegments
+    ? 'segments'
+    : hasGroups
+      ? 'groups'
+      : 'types';
+  const [planView, setPlanView] = useState<'groups' | 'types' | 'segments'>(defaultPlanView);
+  const availablePlanViews: Array<'groups' | 'types' | 'segments'> = [
+    ...(hasSegments ? (['segments'] as const) : []),
+    ...(hasGroups ? (['groups'] as const) : []),
+    'types',
+  ];
+  const safePlanView = availablePlanViews.includes(planView) ? planView : defaultPlanView;
+
+  const grouped = threads.reduce((acc, thread) => {
     const type = thread.thread_type || 'other';
     if (!acc[type]) acc[type] = [];
     acc[type].push(thread);
     return acc;
-  }, {} as Record<string, any[]>) || {};
+  }, {} as Record<string, ResearchThread[]>);
 
-  // Order: segment first, then cross_cutting, then optionality, then others
   const typeOrder = ['segment', 'cross_cutting', 'optionality'];
   const sortedTypes = [
     ...typeOrder.filter(t => grouped[t]),
     ...Object.keys(grouped).filter(t => !typeOrder.includes(t))
   ];
 
-  const totalQuestions = discovery.research_threads?.reduce(
-    (sum, t) => sum + (t.research_questions?.length || 0), 0
-  ) || 0;
+  const threadById = new Map(threads.map((thread) => [thread.thread_id, thread]));
+  const groupEntries = (discovery.research_groups || [])
+    .map((group) => ({
+      group,
+      threads: group.vertical_ids
+        .map((id) => threadById.get(id))
+        .filter((thread): thread is ResearchThread => Boolean(thread)),
+    }))
+    .filter((entry) => entry.threads.length > 0);
+
+  const groupedThreadIds = new Set(groupEntries.flatMap((entry) => entry.threads.map((t) => t.thread_id)));
+  const ungroupedThreads = threads.filter((thread) => !groupedThreadIds.has(thread.thread_id));
+
+  const groupByThread: Record<string, { name: string; index: number }> = {};
+  (discovery.research_groups || []).forEach((group, index) => {
+    (group.vertical_ids || []).forEach((id) => {
+      groupByThread[id] = { name: group.name, index };
+    });
+  });
+
+  const segmentEntries = (discovery.official_segments || []).map((segmentName) => ({
+    segmentName,
+    threads: threads.filter((thread) => thread.official_segment_name === segmentName),
+  }));
+  const segmentsWithThreads = segmentEntries.filter((entry) => entry.threads.length > 0);
+  const emptySegments = segmentEntries.filter((entry) => entry.threads.length === 0).map((entry) => entry.segmentName);
+  const segmentThreadsUnmapped = threads.filter(
+    (thread) => thread.thread_type === 'segment' && !thread.official_segment_name,
+  );
+  const nonSegmentThreads = threads.filter((thread) => thread.thread_type !== 'segment');
+
+  const signalColumns = [
+    { label: 'Cross-Cutting Themes', items: discovery.cross_cutting_themes || [], field: 'cross_cutting_themes' as const },
+    { label: 'Optionality Candidates', items: discovery.optionality_candidates || [], field: 'optionality_candidates' as const },
+    { label: 'Data Gaps', items: discovery.data_gaps || [], field: 'data_gaps' as const },
+    { label: 'Conflicting Signals', items: discovery.conflicting_signals || [], field: 'conflicting_signals' as const },
+  ].filter((column) => column.items.length > 0 || editable);
 
   return (
     <div>
-      {/* Summary stats */}
-      <div className="grid grid-cols-3 gap-4 mb-8">
+      <div className="mb-8 p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-elevated)]">
+        <div className="text-label mb-2">HOW TO READ THIS</div>
+        <p className="text-sm text-[var(--text-secondary)]">
+          Segments come from official reporting. Research threads are the verticals we will deep dive. Questions are prompts
+          for the deep research agents and are not answered yet. External scans are market-wide context threads. Approving
+          starts the deep research step and passes your edits + guidance forward.
+        </p>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-[var(--text-ghost)]">
+          <div>
+            <span className="font-mono text-[var(--text-muted)]">Segments</span> = reported business lines.
+          </div>
+          <div>
+            <span className="font-mono text-[var(--text-muted)]">Threads</span> = verticals we will analyze next.
+          </div>
+          <div>
+            <span className="font-mono text-[var(--text-muted)]">Questions</span> = prompts to answer, not results.
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <div className="data-card">
-          <div className="data-card-label">Research Threads</div>
-          <div className="data-card-value">{discovery.research_threads?.length || 0}</div>
+          <div className="data-card-label">Research Verticals</div>
+          <div className="data-card-value">{threads.length}</div>
         </div>
         <div className="data-card">
-          <div className="data-card-label">Questions Asked</div>
+          <div className="data-card-label">Questions To Answer</div>
           <div className="data-card-value">{totalQuestions}</div>
+        </div>
+        <div className="data-card">
+          <div className="data-card-label">External Scans</div>
+          <div className="data-card-value">{externalCount}</div>
         </div>
         {discovery.official_segments && (
           <div className="data-card">
-            <div className="data-card-label">Official Segments</div>
+            <div className="data-card-label">Reporting Segments</div>
             <div className="data-card-value">{discovery.official_segments.length}</div>
           </div>
         )}
       </div>
 
-      {/* Official segments pills */}
       {discovery.official_segments && discovery.official_segments.length > 0 && (
         <div className="mb-8">
-          <div className="text-label mb-3">OFFICIAL SEGMENTS</div>
+          <div className="text-label mb-3">REPORTING SEGMENTS</div>
           <div className="flex flex-wrap gap-2">
             {discovery.official_segments.map((seg, i) => (
               <span key={i} className="px-3 py-1.5 text-xs font-mono bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded text-[var(--text-secondary)]">
@@ -271,10 +1228,172 @@ function DiscoveryView({ discovery }: { discovery: Discovery }) {
         </div>
       )}
 
-      {/* Grouped threads */}
-      {sortedTypes.map(type => (
-        <ThreadTypeSection key={type} type={type} threads={grouped[type]} />
-      ))}
+      <div className="mb-10">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div className="text-label">RESEARCH PLAN</div>
+          {(hasGroups || hasSegments) && (
+            <div className="flex items-center gap-2">
+              {hasSegments && (
+                <TabButton active={safePlanView === 'segments'} onClick={() => setPlanView('segments')}>
+                  By Segment
+                </TabButton>
+              )}
+              {hasGroups && (
+                <TabButton active={safePlanView === 'groups'} onClick={() => setPlanView('groups')}>
+                  By Group
+                </TabButton>
+              )}
+              <TabButton active={safePlanView === 'types'} onClick={() => setPlanView('types')}>
+                By Thread Type
+              </TabButton>
+            </div>
+          )}
+        </div>
+
+        {safePlanView === 'segments' && hasSegments ? (
+          <div className="space-y-4">
+            {segmentsWithThreads.map((entry, idx) => (
+              <SegmentSection
+                key={entry.segmentName}
+                segmentName={entry.segmentName}
+                threads={entry.threads}
+                defaultExpanded={idx === 0}
+                editable={editable}
+                excludedIds={excludedIds}
+                onToggleExclude={onToggleExclude}
+                onUpdateThread={onUpdateThread}
+                groupByThread={groupByThread}
+                briefMap={briefMap}
+              />
+            ))}
+            {segmentThreadsUnmapped.length > 0 && (
+              <div className="mt-6">
+                <div className="text-label mb-3">SEGMENT THREADS WITHOUT A MATCH</div>
+                <div className="space-y-2">
+                  {segmentThreadsUnmapped.map((thread, i) => (
+                    <ThreadCard
+                      key={thread.thread_id}
+                      thread={thread}
+                      index={i}
+                      groupName={groupByThread?.[thread.thread_id]?.name}
+                      groupIndex={groupByThread?.[thread.thread_id]?.index}
+                      editable={editable}
+                      excludedIds={excludedIds}
+                      onToggleExclude={onToggleExclude}
+                      onUpdateThread={onUpdateThread}
+                      brief={briefMap?.[thread.thread_id]}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {nonSegmentThreads.length > 0 && (
+              <div className="mt-6">
+                <div className="text-label mb-3">CROSS-CUTTING & OPTIONALITY</div>
+                <div className="space-y-2">
+                  {nonSegmentThreads.map((thread, i) => (
+                    <ThreadCard
+                      key={thread.thread_id}
+                      thread={thread}
+                      index={i}
+                      groupName={groupByThread?.[thread.thread_id]?.name}
+                      groupIndex={groupByThread?.[thread.thread_id]?.index}
+                      editable={editable}
+                      excludedIds={excludedIds}
+                      onToggleExclude={onToggleExclude}
+                      onUpdateThread={onUpdateThread}
+                      brief={briefMap?.[thread.thread_id]}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {emptySegments.length > 0 && (
+              <div className="mt-6 p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)] text-xs text-[var(--text-ghost)]">
+                No threads mapped to: {emptySegments.join(', ')}.
+              </div>
+            )}
+          </div>
+        ) : safePlanView === 'groups' && hasGroups ? (
+          <div className="space-y-4">
+            {groupEntries.map((entry, idx) => (
+              <ResearchGroupSection
+                key={entry.group.group_id}
+                group={entry.group}
+                threads={entry.threads}
+                defaultExpanded={idx === 0}
+                groupIndex={idx}
+                editable={editable}
+                excludedIds={excludedIds}
+                onToggleExclude={onToggleExclude}
+                onUpdateThread={onUpdateThread}
+                onUpdateGroup={onUpdateGroup}
+                briefMap={briefMap}
+              />
+            ))}
+            {ungroupedThreads.length > 0 && (
+              <div className="mt-6">
+                <div className="text-label mb-3">OTHER RESEARCH THREADS</div>
+                <div className="space-y-2">
+                  {ungroupedThreads.map((thread, i) => (
+                    <ThreadCard
+                      key={thread.thread_id}
+                      thread={thread}
+                      index={i}
+                      groupName={groupByThread?.[thread.thread_id]?.name}
+                      groupIndex={groupByThread?.[thread.thread_id]?.index}
+                      editable={editable}
+                      excludedIds={excludedIds}
+                      onToggleExclude={onToggleExclude}
+                      onUpdateThread={onUpdateThread}
+                      brief={briefMap?.[thread.thread_id]}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            {sortedTypes.map(type => (
+              <ThreadTypeSection
+                key={type}
+                type={type}
+                threads={grouped[type]}
+                editable={editable}
+                excludedIds={excludedIds}
+                onToggleExclude={onToggleExclude}
+                onUpdateThread={onUpdateThread}
+                groupByThread={groupByThread}
+                briefMap={briefMap}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {signalColumns.length > 0 && (
+        <div className="mb-10">
+          <div className="text-label mb-3">SIGNALS & GAPS</div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {signalColumns.map((column) => (
+              <div key={column.label} className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+                <div className="text-xs font-mono uppercase tracking-wider text-[var(--text-muted)] mb-3">
+                  {column.label}
+                </div>
+                <EditableList
+                  items={column.items}
+                  editable={editable}
+                  placeholder={`Add ${column.label.toLowerCase()}`}
+                  onChange={(items) => onUpdateDiscovery?.(column.field, items)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <SearchPlanSection discovery={discovery} />
     </div>
   );
 }
@@ -306,6 +1425,29 @@ function parseTableOfContents(markdown: string): TocItem[] {
   });
 
   return toc;
+}
+
+function extractEvidenceIds(markdown: string): string[] {
+  const matches = markdown.match(/\bev_[a-zA-Z0-9]+\b/g) || [];
+  return Array.from(new Set(matches));
+}
+
+function extractSectionByPrefix(markdown: string, prefix: string): string | null {
+  const lines = markdown.split('\n');
+  const headerRegex = new RegExp(`^##\\s+${prefix}\\b`, 'i');
+  const startIndex = lines.findIndex(line => headerRegex.test(line));
+  if (startIndex === -1) return null;
+
+  let endIndex = lines.length;
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    if (/^##\s+/.test(lines[i])) {
+      endIndex = i;
+      break;
+    }
+  }
+
+  const section = lines.slice(startIndex + 1, endIndex).join('\n').trim();
+  return section || null;
 }
 
 function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
@@ -360,9 +1502,12 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
     return () => window.removeEventListener('scroll', handleScroll);
   }, [activeSection, toc]);
 
+  type MarkdownComponentProps<T extends keyof JSX.IntrinsicElements> =
+    ComponentPropsWithoutRef<T> & { children?: ReactNode };
+
   // Custom renderer for better styling
-  const components = {
-    h2: ({ children, ...props }: any) => {
+  const components: Components = {
+    h2: ({ children, ...props }: MarkdownComponentProps<'h2'>) => {
       const text = String(children);
       const id = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
       return (
@@ -371,7 +1516,7 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
         </h2>
       );
     },
-    h3: ({ children, ...props }: any) => {
+    h3: ({ children, ...props }: MarkdownComponentProps<'h3'>) => {
       const text = String(children);
       const id = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
       return (
@@ -381,23 +1526,23 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
       );
     },
     // Better table rendering with visual pop
-    table: ({ children, ...props }: any) => (
+    table: ({ children, ...props }: MarkdownComponentProps<'table'>) => (
       <div className="my-8 rounded-xl overflow-hidden shadow-[0_4px_24px_rgba(0,0,0,0.2),0_0_0_1px_var(--border-subtle)] hover:shadow-[0_8px_32px_rgba(0,0,0,0.3),0_0_0_1px_var(--border-default)] transition-shadow duration-300">
         <table className="w-full" {...props}>{children}</table>
       </div>
     ),
-    thead: ({ children, ...props }: any) => (
+    thead: ({ children, ...props }: MarkdownComponentProps<'thead'>) => (
       <thead className="bg-gradient-to-b from-[var(--bg-elevated)] to-[var(--bg-active)]" {...props}>{children}</thead>
     ),
-    tbody: ({ children, ...props }: any) => (
+    tbody: ({ children, ...props }: MarkdownComponentProps<'tbody'>) => (
       <tbody className="bg-[var(--bg-surface)] [&>tr:nth-child(even)]:bg-[var(--bg-elevated)] [&>tr:hover]:bg-[var(--accent-muted)] [&>tr]:transition-colors" {...props}>{children}</tbody>
     ),
-    th: ({ children, ...props }: any) => (
+    th: ({ children, ...props }: MarkdownComponentProps<'th'>) => (
       <th className="px-5 py-4 text-left text-[10px] font-mono font-semibold uppercase tracking-widest text-[var(--accent-bright)] border-b-2 border-[var(--accent)] whitespace-nowrap" {...props}>
         {children}
       </th>
     ),
-    td: ({ children, ...props }: any) => {
+    td: ({ children, ...props }: MarkdownComponentProps<'td'>) => {
       const text = String(children);
       // Enhanced color-coding for financial data
       const isStrongPositive = text.includes('BUY') || text.includes('Outperform') || text.includes('Strong');
@@ -421,22 +1566,22 @@ function ReportViewer({ report, thesis }: { report: string; thesis?: string }) {
       );
     },
     // Better list styling
-    ul: ({ children, ...props }: any) => (
+    ul: ({ children, ...props }: MarkdownComponentProps<'ul'>) => (
       <ul className="my-4 space-y-3 list-disc list-outside pl-6" {...props}>{children}</ul>
     ),
-    li: ({ children, ...props }: any) => (
+    li: ({ children, ...props }: MarkdownComponentProps<'li'>) => (
       <li className="text-[var(--text-secondary)] marker:text-[var(--accent)]" {...props}>
         {children}
       </li>
     ),
     // Better blockquotes
-    blockquote: ({ children, ...props }: any) => (
+    blockquote: ({ children, ...props }: MarkdownComponentProps<'blockquote'>) => (
       <blockquote className="my-6 pl-4 border-l-2 border-[var(--accent)] bg-[var(--accent-muted)] py-3 pr-4 rounded-r-lg" {...props}>
         {children}
       </blockquote>
     ),
     // Better strong/bold
-    strong: ({ children, ...props }: any) => (
+    strong: ({ children, ...props }: MarkdownComponentProps<'strong'>) => (
       <strong className="font-semibold text-[var(--text-primary)]" {...props}>{children}</strong>
     ),
   };
@@ -828,37 +1973,6 @@ function Sparkline({ data, color = 'var(--accent)', height = 24, width = 80 }: {
   );
 }
 
-// Animated number counter
-function AnimatedNumber({ value, prefix = '', suffix = '', decimals = 0 }: {
-  value: number;
-  prefix?: string;
-  suffix?: string;
-  decimals?: number;
-}) {
-  const [display, setDisplay] = useState(0);
-
-  useEffect(() => {
-    const duration = 800;
-    const steps = 30;
-    const increment = value / steps;
-    let current = 0;
-
-    const timer = setInterval(() => {
-      current += increment;
-      if (current >= value) {
-        setDisplay(value);
-        clearInterval(timer);
-      } else {
-        setDisplay(current);
-      }
-    }, duration / steps);
-
-    return () => clearInterval(timer);
-  }, [value]);
-
-  return <span>{prefix}{display.toFixed(decimals)}{suffix}</span>;
-}
-
 // Enhanced metric card with sparkline
 function MetricCard({
   label,
@@ -991,7 +2105,6 @@ function BarChart({
 
   const values = data.map(d => d.value);
   const maxValue = Math.max(...values.filter(v => v > 0), 1);
-  const minValue = Math.min(...values);
 
   return (
     <div className="mb-8 p-6 bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg">
@@ -1139,18 +2252,23 @@ function DonutChart({ segments, size = 120, label }: {
   const strokeWidth = size * 0.15;
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
-
-  let currentOffset = 0;
+  const segmentMeta = segments.reduce<{ percent: number; offset: number; color: string; label: string; value: number }[]>(
+    (acc, segment) => {
+      const percent = total > 0 ? segment.value / total : 0;
+      const offset = acc.length > 0 ? acc[acc.length - 1].offset + acc[acc.length - 1].percent : 0;
+      acc.push({ percent, offset, color: segment.color, label: segment.label, value: segment.value });
+      return acc;
+    },
+    []
+  );
 
   return (
     <div className="flex items-center gap-6">
       <div className="relative" style={{ width: size, height: size }}>
         <svg width={size} height={size} className="transform -rotate-90">
-          {segments.map((segment, i) => {
-            const percent = segment.value / total;
-            const strokeDasharray = `${percent * circumference} ${circumference}`;
-            const strokeDashoffset = -currentOffset * circumference;
-            currentOffset += percent;
+          {segmentMeta.map((segment, i) => {
+            const strokeDasharray = `${segment.percent * circumference} ${circumference}`;
+            const strokeDashoffset = -segment.offset * circumference;
 
             return (
               <circle
@@ -1177,12 +2295,12 @@ function DonutChart({ segments, size = 120, label }: {
       </div>
 
       <div className="space-y-2">
-        {segments.map((segment, i) => (
+        {segmentMeta.map((segment, i) => (
           <div key={i} className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full" style={{ background: segment.color }} />
             <span className="text-xs text-[var(--text-muted)]">{segment.label}</span>
             <span className="text-xs font-mono text-[var(--text-primary)]">
-              {((segment.value / total) * 100).toFixed(0)}%
+              {(segment.percent * 100).toFixed(0)}%
             </span>
           </div>
         ))}
@@ -1239,8 +2357,8 @@ function FinancialsView({ ticker }: { ticker: string }) {
         setError(null);
         const financials = await api.getFinancials(ticker);
         setData(financials);
-      } catch (e: any) {
-        setError(e.message || 'Failed to load financials');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to load financials');
       } finally {
         setLoading(false);
       }
@@ -1547,23 +2665,42 @@ function FinancialsView({ ticker }: { ticker: string }) {
 // ===================== MAIN COMPONENT =====================
 
 // Theme toggle component
-function ThemeToggle({ theme, setTheme }: { theme: 'dark' | 'light'; setTheme: (t: 'dark' | 'light') => void }) {
+function ThemeToggle({
+  theme,
+  setTheme,
+}: {
+  theme: 'dark' | 'light';
+  setTheme: (t: 'dark' | 'light') => void;
+}) {
   return (
     <button
       onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-      className="p-2 rounded-lg border border-[var(--border-subtle)] hover:border-[var(--border-default)] hover:bg-[var(--bg-hover)] transition-all"
-      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+      className="theme-toggle p-2 rounded-lg border border-[var(--border-subtle)] hover:border-[var(--border-default)] hover:bg-[var(--bg-hover)] transition-all"
+      title="Toggle theme"
     >
-      {theme === 'dark' ? (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-[var(--text-muted)]">
-          <circle cx="12" cy="12" r="5"/>
-          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-        </svg>
-      ) : (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-[var(--text-muted)]">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-        </svg>
-      )}
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="theme-icon theme-icon-dark text-[var(--text-muted)]"
+      >
+        <circle cx="12" cy="12" r="5"/>
+        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+      </svg>
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="theme-icon theme-icon-light text-[var(--text-muted)]"
+      >
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
     </button>
   );
 }
@@ -1576,31 +2713,87 @@ export default function Home() {
   const [fullRunData, setFullRunData] = useState<FullRunData | null>(null);
   const [ticker, setTicker] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [currentStage, setCurrentStage] = useState(0);
-  const [events, setEvents] = useState<any[]>([]);
+  const [events, setEvents] = useState<StageEvent[]>([]);
   const [runningRunId, setRunningRunId] = useState<string | null>(null);
   const [runningTicker, setRunningTicker] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [reportTab, setReportTab] = useState<ReportTab>('report');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+  const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [reviewDraft, setReviewDraft] = useState<Discovery | null>(null);
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [reviewExcludedIds, setReviewExcludedIds] = useState<Set<string>>(new Set());
+  const [reviewRunId, setReviewRunId] = useState<string | null>(null);
+  const [reviewSaving, setReviewSaving] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [showDiscoveryOverrides, setShowDiscoveryOverrides] = useState(false);
+  const [externalOverrideMode, setExternalOverrideMode] = useState<'append' | 'replace'>('append');
+  const [externalOverrideLight, setExternalOverrideLight] = useState('');
+  const [externalOverrideAnchored, setExternalOverrideAnchored] = useState('');
+  const [localTranscripts, setLocalTranscripts] = useState<LocalTranscriptsIndex | null>(null);
+  const [localTranscriptsError, setLocalTranscriptsError] = useState<string | null>(null);
+  const [useLocalTranscripts, setUseLocalTranscripts] = useState(false);
+
+  // Hydrate theme from local storage without breaking SSR
+  useEffect(() => {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'light' || saved === 'dark') {
+      setTheme(saved);
+    }
+    setThemeReady(true);
+  }, []);
 
   // Apply theme to document
   useEffect(() => {
+    if (!themeReady) return;
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
-  }, [theme]);
-
-  // Load saved theme
-  useEffect(() => {
-    const saved = localStorage.getItem('theme') as 'dark' | 'light' | null;
-    if (saved) setTheme(saved);
-  }, []);
+  }, [theme, themeReady]);
+  const report = fullRunData?.report || '';
+  const factLedger = useMemo(
+    () => (report ? extractSectionByPrefix(report, 'FACT LEDGER') : null),
+    [report]
+  );
+  const inferenceMap = useMemo(
+    () => (report ? extractSectionByPrefix(report, 'INFERENCE MAP') : null),
+    [report]
+  );
 
   const streamCleanupRef = useRef<(() => void) | null>(null);
 
   const stopStream = () => {
     streamCleanupRef.current?.();
     streamCleanupRef.current = null;
+  };
+
+  const normalizedTicker = ticker.trim().toUpperCase();
+  const localTranscriptMatch = useMemo(() => {
+    if (!normalizedTicker || !localTranscripts?.tickers) return null;
+    if (localTranscripts.tickers[normalizedTicker]) {
+      return { ticker: normalizedTicker, info: localTranscripts.tickers[normalizedTicker] };
+    }
+    const alias = TRANSCRIPT_TICKER_ALIASES[normalizedTicker];
+    if (alias && localTranscripts.tickers[alias]) {
+      return { ticker: alias, info: localTranscripts.tickers[alias] };
+    }
+    return null;
+  }, [localTranscripts, normalizedTicker]);
+
+  const loadLocalTranscripts = async () => {
+    try {
+      const index = await api.getLocalTranscripts();
+      setLocalTranscripts(index);
+      setLocalTranscriptsError(null);
+    } catch (err) {
+      console.error('Failed to load transcript index:', err);
+      setLocalTranscriptsError('Local transcripts unavailable');
+      setLocalTranscripts(null);
+    }
   };
 
   const loadRuns = async () => {
@@ -1621,12 +2814,20 @@ export default function Home() {
       runId,
       (event) => {
         setEvents(prev => [...prev, event]);
-        if (event.type === 'stage_start' && event.data?.stage) {
-          setCurrentStage(event.data.stage);
+        if (event.type === 'stage_update' && (event.stage || event.data?.stage)) {
+          setCurrentStage((event.stage || event.data?.stage) as number);
         }
-        if (event.type === 'complete' || event.type === 'error') {
+        if (event.type === 'run_paused') {
           setIsRunning(false);
-          if (event.type === 'complete') setCurrentStage(5);
+          setIsPaused(true);
+          stopStream();
+          loadRuns();
+          return;
+        }
+        if (event.type === 'run_complete' || event.type === 'run_error' || event.type === 'stream_end' || event.type === 'error') {
+          setIsRunning(false);
+          setIsPaused(false);
+          if (event.type === 'run_complete') setCurrentStage(5);
           loadRuns();
         }
       },
@@ -1635,12 +2836,13 @@ export default function Home() {
   };
 
   const goToRun = async (run: DisplayRun) => {
-    if (run.isActive) {
+    if (run.isActive || run.status === 'paused') {
       setRunningTicker(run.ticker);
       setRunningRunId(run.id);
       setEvents([]);
       setCurrentStage(run.currentStage || 0);
-      setIsRunning(true);
+      setIsRunning(run.status !== 'paused');
+      setIsPaused(run.status === 'paused');
       setView('running');
 
       try {
@@ -1665,12 +2867,88 @@ export default function Home() {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    const schedule = (fn: () => void) => {
+      queueMicrotask(() => {
+        if (!cancelled) {
+          fn();
+        }
+      });
+    };
+    const resetEvidence = () => {
+      setEvidenceItems([]);
+      setEvidenceError(null);
+      setEvidenceLoading(false);
+    };
+
+    if (!report) {
+      schedule(resetEvidence);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const ids = extractEvidenceIds(report);
+    if (!selectedRun?.id || ids.length === 0) {
+      schedule(resetEvidence);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    schedule(() => {
+      setEvidenceLoading(true);
+      setEvidenceError(null);
+    });
+
+    api.getEvidence(selectedRun.id, ids)
+      .then((res) => {
+        if (cancelled) return;
+        const items = res.items || [];
+        setEvidenceItems(items);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setEvidenceError(err instanceof Error ? err.message : 'Failed to load evidence');
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setEvidenceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [report, selectedRun?.id]);
+
+  useEffect(() => {
+    if (!fullRunData?.discovery || !selectedRun?.id) return;
+    if (reviewRunId === selectedRun.id && reviewDraft) return;
+    setReviewDraft(JSON.parse(JSON.stringify(fullRunData.discovery)) as Discovery);
+    setReviewExcludedIds(new Set());
+    setReviewNotes('');
+    setReviewRunId(selectedRun.id);
+    setReviewError(null);
+  }, [fullRunData?.discovery, selectedRun?.id, reviewDraft, reviewRunId]);
+
   const startAnalysis = async () => {
     if (!ticker.trim()) return;
 
     const t = ticker.toUpperCase();
+    const parseOverrides = (value: string) => value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const lightOverrides = parseOverrides(externalOverrideLight);
+    const anchoredOverrides = parseOverrides(externalOverrideAnchored);
+    const externalOverrides: Record<string, string[]> = {};
+    if (lightOverrides.length > 0) externalOverrides.light = lightOverrides;
+    if (anchoredOverrides.length > 0) externalOverrides.anchored = anchoredOverrides;
+    const transcriptsDir = useLocalTranscripts ? localTranscriptMatch?.info.dir : undefined;
+
     setError(null);
     setIsRunning(true);
+    setIsPaused(false);
     setView('running');
     setRunningTicker(t);
     setCurrentStage(0);
@@ -1682,15 +2960,20 @@ export default function Home() {
         budget: 5.0,
         quarters: 4,
         use_dual_discovery: true,
-        use_deep_research: true
+        use_deep_research: true,
+        include_transcripts: true,
+        require_discovery_approval: true,
+        external_discovery_overrides: Object.keys(externalOverrides).length ? externalOverrides : undefined,
+        external_discovery_override_mode: externalOverrideMode,
+        ...(transcriptsDir ? { transcripts_dir: transcriptsDir } : {}),
       });
 
       setRunningRunId(result.run_id);
       connectStream(result.run_id);
       loadRuns();
-    } catch (e: any) {
-      console.error('Failed to start:', e);
-      setError(e.message || 'Failed to start analysis');
+    } catch (err: unknown) {
+      console.error('Failed to start:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start analysis');
       setIsRunning(false);
     }
   };
@@ -1699,10 +2982,143 @@ export default function Home() {
     try {
       await api.cancelRun(runId);
       setIsRunning(false);
+      setIsPaused(false);
       stopStream();
       loadRuns();
     } catch (e) {
       console.error('Failed to cancel:', e);
+    }
+  };
+
+  const continueRun = async (overrideRunId?: string) => {
+    const targetRunId = overrideRunId || runningRunId || selectedRun?.id || null;
+    if (!targetRunId) return;
+    try {
+      setIsPaused(false);
+      setIsRunning(true);
+      const result = await api.continueRun(targetRunId);
+      connectStream(result.run_id);
+      loadRuns();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to resume run');
+      setIsRunning(false);
+      setIsPaused(true);
+    }
+  };
+
+  const toggleReviewExclude = (threadId: string) => {
+    setReviewExcludedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(threadId)) {
+        next.delete(threadId);
+      } else {
+        next.add(threadId);
+      }
+      return next;
+    });
+  };
+
+  const updateReviewThread = (threadId: string, patch: Partial<ResearchThread>) => {
+    setReviewDraft((prev) => {
+      if (!prev) return prev;
+      const updated = prev.research_threads.map((thread) =>
+        thread.thread_id === threadId ? { ...thread, ...patch } : thread
+      );
+      return { ...prev, research_threads: updated };
+    });
+  };
+
+  const updateReviewGroup = (groupId: string, patch: Partial<ResearchGroup>) => {
+    setReviewDraft((prev) => {
+      if (!prev) return prev;
+      const updatedGroups = (prev.research_groups || []).map((group) =>
+        group.group_id === groupId ? { ...group, ...patch } : group
+      );
+      return { ...prev, research_groups: updatedGroups };
+    });
+  };
+
+  const updateReviewDiscoveryField = (field: keyof Discovery, value: unknown) => {
+    setReviewDraft((prev) => {
+      if (!prev) return prev;
+      return { ...prev, [field]: value };
+    });
+  };
+
+  const buildReviewedDiscovery = () => {
+    if (!reviewDraft) return null;
+    const excluded = reviewExcludedIds;
+    const filteredThreads = reviewDraft.research_threads.filter((t) => !excluded.has(t.thread_id));
+    const filteredGroups = (reviewDraft.research_groups || [])
+      .map((group) => ({
+        ...group,
+        vertical_ids: group.vertical_ids.filter((id) => !excluded.has(id)),
+      }))
+      .filter((group) => group.vertical_ids.length > 0);
+    return {
+      ...reviewDraft,
+      research_threads: filteredThreads,
+      research_groups: filteredGroups,
+    };
+  };
+
+  const saveDiscoveryReview = async (overrideRunId?: string) => {
+    const targetRunId = overrideRunId || selectedRun?.id || runningRunId || null;
+    if (!targetRunId || !reviewDraft) return;
+    const reviewed = buildReviewedDiscovery();
+    if (!reviewed) return;
+    setReviewSaving(true);
+    try {
+      await api.saveDiscoveryReview(targetRunId, reviewed, reviewNotes.trim() || undefined);
+      setReviewDraft(reviewed);
+      setReviewExcludedIds(new Set());
+      const data = await api.getRun(targetRunId) as FullRunData;
+      setFullRunData(data);
+      setReviewError(null);
+    } catch (err) {
+      console.error('Failed to save discovery review:', err);
+      setReviewError('Failed to save discovery edits');
+    } finally {
+      setReviewSaving(false);
+    }
+  };
+
+  const approveDiscovery = async () => {
+    const targetRunId = selectedRun?.id || runningRunId || null;
+    if (!targetRunId) return;
+    await saveDiscoveryReview(targetRunId);
+    await continueRun(targetRunId);
+  };
+
+  const resetDiscoveryReview = () => {
+    if (!fullRunData?.discovery) return;
+    setReviewDraft(JSON.parse(JSON.stringify(fullRunData.discovery)) as Discovery);
+    setReviewExcludedIds(new Set());
+    setReviewNotes('');
+    setReviewError(null);
+  };
+
+  const reviewDiscovery = async (overrideRunId?: string) => {
+    const pausedRun = activeRuns.find((run) => run.status === 'paused');
+    const targetRunId = overrideRunId || runningRunId || selectedRun?.id || pausedRun?.id || null;
+    if (!targetRunId) return;
+    const targetTicker = runningTicker || selectedRun?.ticker || pausedRun?.ticker || '';
+    stopStream();
+    setReportTab('discovery');
+    setView('report');
+    setSelectedRun({
+      id: targetRunId,
+      ticker: targetTicker,
+      status: 'paused',
+      createdAt: new Date().toISOString(),
+      isActive: false
+    });
+    setFullRunData(null);
+    try {
+      const data = await api.getRun(targetRunId) as FullRunData;
+      setFullRunData(data);
+    } catch (err) {
+      console.error('Failed to load discovery:', err);
     }
   };
 
@@ -1713,23 +3129,31 @@ export default function Home() {
     try {
       await api.deleteRun(runId);
       loadRuns();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete');
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'Failed to delete');
     }
   };
 
   useEffect(() => {
-    loadRuns();
+    queueMicrotask(() => {
+      void loadRuns();
+    });
     return () => stopStream();
   }, []);
 
-  const stages = [
-    { num: 1, name: 'Discovery' },
-    { num: 2, name: 'Vertical Analysis' },
-    { num: 3, name: 'Synthesis' },
-    { num: 4, name: 'Judgment' },
-    { num: 5, name: 'Report' }
-  ];
+  useEffect(() => {
+    queueMicrotask(() => {
+      void loadLocalTranscripts();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (localTranscriptMatch) {
+      setUseLocalTranscripts(true);
+    } else {
+      setUseLocalTranscripts(false);
+    }
+  }, [localTranscriptMatch?.ticker]);
 
   const allRuns = [...activeRuns, ...completedRuns].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -1758,6 +3182,7 @@ export default function Home() {
             >
               Archive ({allRuns.length})
             </button>
+            <ThemeToggle theme={theme} setTheme={setTheme} />
           </nav>
         </header>
 
@@ -1789,6 +3214,122 @@ export default function Home() {
                 Analyze
               </button>
             </div>
+            <div className="mt-6 flex flex-col items-center gap-3">
+              <label className="text-xs font-mono uppercase tracking-wider text-[var(--text-ghost)]">
+                Local transcripts
+              </label>
+              <div className="flex flex-wrap items-center justify-center gap-3 text-[11px] text-[var(--text-ghost)] font-mono tracking-wide text-center">
+                {localTranscriptMatch ? (
+                  <label className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
+                    <input
+                      type="checkbox"
+                      checked={useLocalTranscripts}
+                      onChange={(e) => setUseLocalTranscripts(e.target.checked)}
+                    />
+                    Use {localTranscriptMatch.ticker} transcripts ({localTranscriptMatch.info.count} files)
+                  </label>
+                ) : (
+                  <span>
+                    {localTranscriptsError
+                      ? localTranscriptsError
+                      : localTranscripts
+                        ? normalizedTicker
+                          ? `No local transcripts found for ${normalizedTicker}.`
+                          : Object.keys(localTranscripts.tickers).length > 0
+                            ? `Available: ${Object.keys(localTranscripts.tickers).join(', ')}`
+                            : 'No local transcripts available.'
+                        : 'Checking local transcripts...'}
+                  </span>
+                )}
+                <button
+                  onClick={() => void loadLocalTranscripts()}
+                  className="px-2.5 py-1 text-[10px] font-mono uppercase border border-[var(--border-subtle)] rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-default)] transition-colors"
+                >
+                  Refresh
+                </button>
+              </div>
+              {localTranscriptMatch && (
+                <div className="text-[10px] text-[var(--text-muted)] font-mono uppercase tracking-wider text-center">
+                  {localTranscriptMatch.info.files.join(' · ')}
+                </div>
+              )}
+            </div>
+            <div className="mt-8 w-full max-w-2xl">
+              <button
+                onClick={() => setShowDiscoveryOverrides((prev) => !prev)}
+                className="w-full flex items-center justify-between px-4 py-3 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)] text-xs font-mono uppercase tracking-wider text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-default)] transition-colors"
+              >
+                Search Topics (Optional)
+                <span className="text-[var(--accent)]">{showDiscoveryOverrides ? '−' : '+'}</span>
+              </button>
+
+              {showDiscoveryOverrides && (
+                <div className="mt-4 p-5 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-elevated)] space-y-5">
+                  <div className="text-[11px] text-[var(--text-ghost)] font-mono">
+                    Optional. Leave empty to use the default discovery plan. These only steer the external web scan.
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-label mb-1">How to apply your topics</div>
+                      <p className="text-[11px] text-[var(--text-ghost)] font-mono">
+                        Append adds your queries to the auto plan. Replace uses only your queries.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setExternalOverrideMode('append')}
+                        className={`px-3 py-1.5 text-xs font-mono uppercase rounded border ${
+                          externalOverrideMode === 'append'
+                            ? 'border-[var(--accent)] text-[var(--accent-bright)] bg-[var(--accent-muted)]'
+                            : 'border-[var(--border-subtle)] text-[var(--text-muted)]'
+                        }`}
+                      >
+                        Append
+                      </button>
+                      <button
+                        onClick={() => setExternalOverrideMode('replace')}
+                        className={`px-3 py-1.5 text-xs font-mono uppercase rounded border ${
+                          externalOverrideMode === 'replace'
+                            ? 'border-[var(--accent)] text-[var(--accent-bright)] bg-[var(--accent-muted)]'
+                            : 'border-[var(--border-subtle)] text-[var(--text-muted)]'
+                        }`}
+                      >
+                        Replace
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-label mb-2">Market Scan Topics (no ticker)</div>
+                      <textarea
+                        value={externalOverrideLight}
+                        onChange={(e) => setExternalOverrideLight(e.target.value)}
+                        placeholder={"One topic per line\nExample: robotaxi regulatory updates\nExample: TPU market pricing"}
+                        rows={6}
+                        className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                      />
+                      <div className="mt-2 text-[11px] text-[var(--text-ghost)] font-mono">
+                        Keep this general. Avoid company names for broader market scan.
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-label mb-2">Company Scan Topics (use ticker)</div>
+                      <textarea
+                        value={externalOverrideAnchored}
+                        onChange={(e) => setExternalOverrideAnchored(e.target.value)}
+                        placeholder={"One topic per line\nExample: GOOGL Waymo revenue trajectory\nExample: GOOGL TPU external sales"}
+                        rows={6}
+                        className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                      />
+                      <div className="mt-2 text-[11px] text-[var(--text-ghost)] font-mono">
+                        Include the ticker for precise, targeted coverage.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
             {error && (
               <p className="mt-4 text-sm text-[var(--negative)] text-center">{error}</p>
             )}
@@ -1817,6 +3358,7 @@ export default function Home() {
           <span className="font-mono text-sm text-[var(--text-muted)]">
             {activeRuns.length} active · {completedRuns.length} completed
           </span>
+          <ThemeToggle theme={theme} setTheme={setTheme} />
         </header>
 
         <main className="flex-1 px-6 py-6 overflow-auto">
@@ -1840,7 +3382,10 @@ export default function Home() {
                     {run.isActive ? (
                       <span className="ml-auto flex items-center gap-2 text-xs font-mono text-[var(--accent)]">
                         <span className="status-dot processing" />
-                        Stage {run.currentStage || '?'}/5
+                        {resolveStageLabel(run.currentStage) || `Stage ${run.currentStage || '?'}`}
+                        <span className="text-[var(--text-ghost)]">
+                          · {resolveStagePosition(run.currentStage) || '?'} / {PIPELINE_STAGES.length}
+                        </span>
                       </span>
                     ) : run.verdict ? (
                       <span className={`ml-auto text-xs font-mono font-semibold ${
@@ -1873,7 +3418,19 @@ export default function Home() {
 
   // ==================== RUNNING ====================
   if (view === 'running') {
-    const progress = (currentStage / 5) * 100;
+    const currentStagePosition = resolveStagePosition(currentStage);
+    const progress = (currentStagePosition / PIPELINE_STAGES.length) * 100;
+    const currentStageLabel = resolveStageLabel(currentStage) || PIPELINE_STAGES[currentStagePosition - 1]?.name || 'Discovery';
+    const statusLabel = isRunning ? 'Processing' : isPaused ? 'Awaiting Approval' : 'Complete';
+    const statusClass = isRunning ? 'running' : isPaused ? 'paused' : 'complete';
+    const formatEventTime = (timestamp?: string) => {
+      if (!timestamp) return '';
+      try {
+        return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch {
+        return '';
+      }
+    };
 
     return (
       <div className="min-h-screen flex flex-col bg-[var(--bg-void)]">
@@ -1904,53 +3461,76 @@ export default function Home() {
                   </button>
                 )}
               </>
+            ) : isPaused ? (
+              <>
+                <span className="flex items-center gap-2 text-xs font-mono text-[var(--warning)]">
+                  <span className="status-dot processing" />
+                  Awaiting Approval
+                </span>
+              </>
             ) : (
               <span className="flex items-center gap-2 text-xs font-mono text-[var(--positive)]">
                 <span className="status-dot active" />
                 Complete
               </span>
             )}
+            <ThemeToggle theme={theme} setTheme={setTheme} />
           </div>
         </header>
 
         <main className="flex-1 px-6 py-8 overflow-auto">
-          <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-10 items-start">
             {/* Left: Progress */}
-            <div>
-              <h1 className="text-2xl font-display font-bold text-[var(--text-primary)] mb-6">
-                {isRunning ? 'Processing...' : 'Analysis Complete'}
-              </h1>
+            <div className="space-y-6">
+              <div className="run-card">
+                <div className="run-summary-header">
+                  <h1 className="text-title text-[var(--text-primary)]">
+                    {isRunning ? 'Processing' : isPaused ? 'Awaiting Approval' : 'Analysis Complete'}
+                  </h1>
+                  <span className={`status-pill ${statusClass}`}>{statusLabel}</span>
+                </div>
+                <div className="run-summary-meta">
+                  <span>Current stage:</span>
+                  <strong>{currentStageLabel}</strong>
+                  <span>•</span>
+                  <span>Step {currentStagePosition || 1} of {PIPELINE_STAGES.length}</span>
+                </div>
 
-              {/* Progress bar */}
-              <div className="progress-line mb-8">
-                <div className="progress-fill" style={{ width: `${progress}%` }} />
+                <div className="progress-line mt-6">
+                  <div className="progress-fill" style={{ width: `${progress}%` }} />
+                </div>
               </div>
 
-              {/* Stages */}
-              <div className="space-y-1">
-                {stages.map((stage, i) => {
-                  const isComplete = i < currentStage;
-                  const isCurrent = i === currentStage - 1 && isRunning;
+              <div className="run-card">
+                <div className="text-label mb-4">PIPELINE</div>
+                <div className="stage-list">
+                  {PIPELINE_STAGES.map((stage, i) => {
+                    const position = i + 1;
+                    const isComplete = isRunning
+                      ? position < currentStagePosition
+                      : position <= currentStagePosition;
+                    const isCurrent = isRunning && position === currentStagePosition;
 
-                  return (
-                    <div
-                      key={stage.num}
-                      className={`stage ${isCurrent ? 'active' : ''} ${isComplete ? 'complete' : ''}`}
-                    >
-                      <span className="stage-num">{String(stage.num).padStart(2, '0')}</span>
-                      <span className="stage-name">{stage.name}</span>
-                      <span className="ml-auto text-sm">
-                        {isComplete && <span className="text-[var(--positive)]">✓</span>}
-                        {isCurrent && <span className="animate-pulse text-[var(--accent)]">●</span>}
-                      </span>
-                    </div>
-                  );
-                })}
+                    return (
+                      <div
+                        key={stage.id}
+                        className={`stage ${isCurrent ? 'active' : ''} ${isComplete ? 'complete' : ''}`}
+                      >
+                        <span className="stage-num">{String(position).padStart(2, '0')}</span>
+                        <span className="stage-name">{stage.name}</span>
+                        <span className="stage-status">
+                          {isComplete && <span className="text-[var(--positive)]">✓</span>}
+                          {isCurrent && <span className="animate-pulse text-[var(--accent)]">●</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Actions */}
-              {!isRunning && (
-                <div className="mt-8 flex gap-3">
+              {!isRunning && !isPaused && (
+                <div className="flex gap-3">
                   {runningRunId && (
                     <button
                       onClick={() => goToRun({
@@ -1970,30 +3550,72 @@ export default function Home() {
                   </button>
                 </div>
               )}
+
+              {isPaused && (
+                <div className="run-card">
+                  <div className="text-label mb-2">NEXT STEP</div>
+                  <p className="text-sm text-[var(--text-secondary)] mb-4">
+                    Discovery is ready. Review the plan or continue to deep research.
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    <button onClick={reviewDiscovery} className="btn">
+                      Review Discovery
+                    </button>
+                    <button onClick={approveDiscovery} className="btn btn-primary">
+                      Approve & Continue
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Right: Event Log */}
-            <div className="event-log">
-              <div className="text-xs font-mono text-[var(--text-ghost)] mb-3">
-                {events.length} events
+            <div className="event-log self-start">
+              <div className="event-log-header">
+                <div>
+                  <div className="text-label">ACTIVITY</div>
+                  <div className="text-xs text-[var(--text-ghost)]">Latest 50 updates</div>
+                </div>
+                <span className="event-log-count">{events.length} events</span>
               </div>
               {events.length === 0 ? (
                 <p className="text-[var(--text-ghost)] text-sm">Waiting for events...</p>
               ) : (
-                <div className="space-y-1">
-                  {events.slice(-50).map((event, i) => (
-                    <div key={i} className={`event-log-item ${
-                      event.type === 'stage_start' ? 'stage-start' :
-                      event.type === 'stage_complete' ? 'stage-complete' :
-                      event.type === 'error' ? 'error' : ''
-                    }`}>
-                      {event.type === 'stage_start' && <span>→ {event.data?.stage_name}</span>}
-                      {event.type === 'stage_complete' && <span>✓ {event.data?.stage_name}</span>}
-                      {event.type === 'agent_event' && <span>{event.data?.message || '...'}</span>}
-                      {event.type === 'complete' && <span className="font-bold">● Complete</span>}
-                      {event.type === 'error' && <span>× {event.data?.detail}</span>}
-                    </div>
-                  ))}
+                <div className="event-log-list">
+                  {events.slice(-50).map((event, i) => {
+                    const stageStatus = event.data?.status;
+                    const stageLabel = event.data?.stage_name || 'Stage update';
+                    const eventClass = event.type === 'stage_update'
+                      ? stageStatus === 'complete'
+                        ? 'stage-complete'
+                        : 'stage-start'
+                      : event.type === 'error' || event.type === 'run_error'
+                        ? 'error'
+                        : '';
+                    let label = '';
+                    if (event.type === 'stage_update') {
+                      label = `${stageStatus === 'complete' ? 'Completed' : 'Started'} ${stageLabel}`;
+                    } else if (event.type === 'agent_event') {
+                      label = event.data?.message || 'Agent update';
+                    } else if (event.type === 'run_complete') {
+                      label = 'Run complete';
+                    } else if (event.type === 'run_paused') {
+                      label = 'Awaiting approval';
+                    } else if (event.type === 'run_error') {
+                      label = event.data?.error || 'Run error';
+                    } else if (event.type === 'error') {
+                      label = event.data?.detail || 'Error';
+                    } else {
+                      label = 'Update';
+                    }
+
+                    return (
+                      <div key={i} className={`event-log-item ${eventClass}`}>
+                        <span className="event-time">{formatEventTime(event.timestamp)}</span>
+                        <span className="event-label">{label}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2010,6 +3632,15 @@ export default function Home() {
     const costs = fullRunData?.costs;
     const discovery = fullRunData?.discovery;
     const verticals = fullRunData?.verticals;
+    const needsApproval = selectedRun.status === 'paused';
+    const discoveryForReview = reviewDraft || discovery;
+    const briefMap = discoveryForReview?.thread_briefs
+      ? Object.fromEntries(
+          (discoveryForReview.thread_briefs as Array<Record<string, unknown>>)
+            .filter((tb) => typeof tb.thread_id === 'string')
+            .map((tb) => [String(tb.thread_id), tb])
+        )
+      : {};
 
     return (
       <div className="min-h-screen bg-[var(--bg-void)]">
@@ -2062,6 +3693,9 @@ export default function Home() {
           <TabButton active={reportTab === 'synthesis'} onClick={() => setReportTab('synthesis')}>
             Synthesis
           </TabButton>
+          <TabButton active={reportTab === 'sources'} onClick={() => setReportTab('sources')}>
+            Sources
+          </TabButton>
           <TabButton active={reportTab === 'financials'} onClick={() => setReportTab('financials')}>
             Financials
           </TabButton>
@@ -2073,6 +3707,33 @@ export default function Home() {
         {/* Content */}
         <main className="px-6 py-8">
           <div className={reportTab === 'report' ? 'max-w-[85rem] mx-auto' : 'max-w-5xl mx-auto'}>
+            {needsApproval && reportTab === 'discovery' && (
+              <div className="mb-8 p-5 border border-[var(--accent)] rounded-lg bg-[var(--accent-muted)] flex flex-col gap-4">
+                <div>
+                  <div className="text-label mb-2">DISCOVERY REVIEW</div>
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    Discovery is complete. Review the verticals and search plan below, then approve to start deep research.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <button onClick={() => setView('running')} className="btn">
+                    Back to Progress
+                  </button>
+                  <button onClick={() => saveDiscoveryReview(selectedRun.id)} className="btn">
+                    {reviewSaving ? 'Saving…' : 'Save & Stay Paused'}
+                  </button>
+                  <button onClick={approveDiscovery} className="btn btn-primary">
+                    Approve & Continue
+                  </button>
+                  <button onClick={() => cancelRun(selectedRun.id)} className="btn">
+                    Cancel Run
+                  </button>
+                </div>
+                {reviewError && (
+                  <div className="text-sm text-[var(--negative)]">{reviewError}</div>
+                )}
+              </div>
+            )}
 
             {/* REPORT TAB */}
             {reportTab === 'report' && (
@@ -2175,9 +3836,51 @@ export default function Home() {
 
             {/* DISCOVERY TAB */}
             {reportTab === 'discovery' && (
-              <div className="animate-fade-in">
-                {discovery ? (
-                  <DiscoveryView discovery={discovery} />
+              <div className="animate-fade-in space-y-8">
+                {discoveryForReview ? (
+                  <>
+                    <DiscoveryView
+                      discovery={discoveryForReview}
+                      editable={needsApproval}
+                      excludedIds={reviewExcludedIds}
+                      onToggleExclude={toggleReviewExclude}
+                      onUpdateThread={updateReviewThread}
+                      onUpdateGroup={updateReviewGroup}
+                      onUpdateDiscovery={updateReviewDiscoveryField}
+                      briefMap={briefMap}
+                    />
+                    {needsApproval && (
+                      <div className="p-5 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)] space-y-4">
+                        <div>
+                      <div className="text-label mb-2">GLOBAL GUIDANCE (APPLIES TO ALL GROUPS)</div>
+                      <p className="text-xs text-[var(--text-ghost)]">
+                            Applies to both deep research agents. Add group-specific guidance inside each group card above.
+                      </p>
+                        </div>
+                        <textarea
+                          value={reviewNotes}
+                          onChange={(e) => setReviewNotes(e.target.value)}
+                          rows={5}
+                          placeholder="Example: Prioritize Waymo monetization and recent TPU external sales; ignore legacy Android margins."
+                          className="w-full bg-transparent border border-[var(--border-default)] rounded px-3 py-2 text-xs font-mono text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+                        />
+                        <div className="flex flex-wrap gap-3">
+                          <button onClick={resetDiscoveryReview} className="btn">
+                            Reset Changes
+                          </button>
+                          <button onClick={() => saveDiscoveryReview(selectedRun.id)} className="btn">
+                            {reviewSaving ? 'Saving…' : 'Save & Stay Paused'}
+                          </button>
+                          <button onClick={approveDiscovery} className="btn btn-primary">
+                            Approve & Continue
+                          </button>
+                        </div>
+                        {reviewError && (
+                          <div className="text-sm text-[var(--negative)]">{reviewError}</div>
+                        )}
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <p className="text-[var(--text-ghost)]">No discovery data available</p>
                 )}
@@ -2229,6 +3932,80 @@ export default function Home() {
               </div>
             )}
 
+            {/* SOURCES TAB */}
+            {reportTab === 'sources' && (
+              <div className="animate-fade-in space-y-8">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+                    <div className="text-label mb-3">FACT LEDGER</div>
+                    {factLedger ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {factLedger}
+                      </ReactMarkdown>
+                    ) : (
+                      <p className="text-[var(--text-ghost)]">No fact ledger found in the report.</p>
+                    )}
+                  </div>
+                  <div className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+                    <div className="text-label mb-3">INFERENCE MAP</div>
+                    {inferenceMap ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {inferenceMap}
+                      </ReactMarkdown>
+                    ) : (
+                      <p className="text-[var(--text-ghost)]">No inference map found in the report.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-surface)]">
+                  <div className="text-label mb-3">SOURCES</div>
+                  {evidenceLoading ? (
+                    <p className="text-[var(--text-ghost)]">Loading sources...</p>
+                  ) : evidenceError ? (
+                    <p className="text-[var(--negative)]">{evidenceError}</p>
+                  ) : evidenceItems.length === 0 ? (
+                    <p className="text-[var(--text-ghost)]">No evidence IDs found in the report.</p>
+                  ) : (
+                    <div className="space-y-4">
+                      {evidenceItems.map((item) => (
+                        <div key={`${item.evidence_id}-${item.type}`} className="p-4 border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-elevated)]">
+                          <div className="flex items-center justify-between text-xs font-mono text-[var(--text-muted)] mb-2">
+                            <span>{item.evidence_id}</span>
+                            <span className="uppercase">{item.type.replace('_', ' ')}</span>
+                          </div>
+                          {item.title ? (
+                            item.url ? (
+                              <a href={item.url} target="_blank" rel="noreferrer" className="block text-sm text-[var(--accent-bright)] hover:underline mb-2">
+                                {item.title}
+                              </a>
+                            ) : (
+                              <div className="text-sm text-[var(--text-primary)] mb-2">{item.title}</div>
+                            )
+                          ) : null}
+                          {item.summary ? (
+                            <p className="text-sm text-[var(--text-secondary)] mb-2">{item.summary}</p>
+                          ) : item.snippet ? (
+                            <p className="text-sm text-[var(--text-secondary)] mb-2">{item.snippet}</p>
+                          ) : null}
+                          {item.key_facts && item.key_facts.length > 0 && (
+                            <ul className="list-disc pl-5 space-y-1 text-sm text-[var(--text-secondary)]">
+                              {item.key_facts.slice(0, 5).map((fact, idx) => (
+                                <li key={idx}>{fact}</li>
+                              ))}
+                            </ul>
+                          )}
+                          {!item.title && item.type === 'missing' && (
+                            <p className="text-sm text-[var(--warning)]">Evidence not found in this run&apos;s store.</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* FINANCIALS TAB */}
             {reportTab === 'financials' && (
               <div className="animate-fade-in">
@@ -2246,7 +4023,7 @@ export default function Home() {
                   </p>
                 </div>
 
-                {/* Key Metrics with AnimatedNumber */}
+                {/* Key Metrics */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
                   <MetricCard
                     label="Total Cost"

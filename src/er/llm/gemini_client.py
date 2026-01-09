@@ -200,6 +200,9 @@ class GeminiClient:
                 stop_sequences=request.stop,
             )
 
+            if request.response_format and request.response_format.get("type") == "json_object":
+                config.response_mime_type = "application/json"
+
             if system_instruction:
                 config.system_instruction = system_instruction
 
@@ -233,6 +236,25 @@ class GeminiClient:
                 if reason:
                     finish_reason = str(reason).lower()
 
+            grounding_chunks: list[dict[str, Any]] = []
+            if response.candidates:
+                candidate = response.candidates[0]
+                grounding_metadata = getattr(candidate, "grounding_metadata", None)
+                chunks = getattr(grounding_metadata, "grounding_chunks", None) if grounding_metadata else None
+                if chunks:
+                    for chunk in chunks:
+                        web = getattr(chunk, "web", None)
+                        if not web:
+                            continue
+                        url = getattr(web, "uri", None) or getattr(web, "url", None) or ""
+                        title = getattr(web, "title", None) or ""
+                        snippet = getattr(web, "snippet", None) or ""
+                        grounding_chunks.append({
+                            "title": title,
+                            "url": url,
+                            "snippet": snippet,
+                        })
+
             return LLMResponse(
                 content=content,
                 model=request.model,
@@ -241,6 +263,7 @@ class GeminiClient:
                 output_tokens=output_tokens,
                 finish_reason=finish_reason,
                 latency_ms=latency_ms,
+                metadata={"grounding_chunks": grounding_chunks},
             )
 
         except Exception as e:
@@ -296,6 +319,9 @@ class GeminiClient:
                 stop_sequences=request.stop,
                 tools=tools,
             )
+
+            if request.response_format and request.response_format.get("type") == "json_object":
+                config.response_mime_type = "application/json"
 
             if system_instruction:
                 config.system_instruction = system_instruction
@@ -431,6 +457,13 @@ class GeminiClient:
                 tools=tools if tools else None,
             )
 
+            if (
+                request.response_format
+                and request.response_format.get("type") == "json_object"
+                and not enable_google_search
+            ):
+                config.response_mime_type = "application/json"
+
             if system_instruction:
                 config.system_instruction = system_instruction
 
@@ -464,6 +497,31 @@ class GeminiClient:
                 if reason:
                     finish_reason = str(reason).lower()
 
+            metadata: dict[str, Any] | None = None
+            if response.candidates and getattr(response.candidates[0], "grounding_metadata", None):
+                gm = response.candidates[0].grounding_metadata
+                metadata = {}
+                chunks = []
+                for chunk in gm.grounding_chunks or []:
+                    entry: dict[str, Any] = {}
+                    if chunk.web:
+                        entry["title"] = chunk.web.title or ""
+                        entry["url"] = chunk.web.uri or ""
+                        entry["source"] = chunk.web.domain or ""
+                    if chunk.retrieved_context:
+                        if not entry.get("title"):
+                            entry["title"] = chunk.retrieved_context.title or chunk.retrieved_context.document_name or ""
+                        if not entry.get("url"):
+                            entry["url"] = chunk.retrieved_context.uri or ""
+                        if chunk.retrieved_context.text:
+                            entry["snippet"] = chunk.retrieved_context.text
+                    if entry.get("url") or entry.get("title"):
+                        chunks.append(entry)
+                if chunks:
+                    metadata["grounding_chunks"] = chunks
+                if gm.web_search_queries:
+                    metadata["web_search_queries"] = list(gm.web_search_queries)
+
             return LLMResponse(
                 content=content,
                 model=request.model,
@@ -472,6 +530,7 @@ class GeminiClient:
                 output_tokens=output_tokens,
                 finish_reason=finish_reason,
                 latency_ms=latency_ms,
+                metadata=metadata,
             )
 
         except Exception as e:
