@@ -22,6 +22,11 @@ export interface RunConfig {
   useDualDiscovery: boolean;
   useDeepResearch: boolean;
   maxVerticals?: number;
+  transcriptsDir?: string;
+  manualTranscripts?: Array<Record<string, unknown>>;
+  requireDiscoveryApproval?: boolean;
+  externalDiscoveryOverrides?: Record<string, string[]>;
+  externalDiscoveryOverrideMode?: 'append' | 'replace';
 }
 
 export interface RunState {
@@ -39,62 +44,71 @@ export interface RunState {
 }
 
 export interface DiscoveredThread {
-  threadId: string;
+  thread_id: string;
   name: string;
   description: string;
-  threadType: 'SEGMENT' | 'OPTIONALITY' | 'CROSS_CUTTING';
+  thread_type: 'segment' | 'optionality' | 'cross_cutting';
   priority: number;
-  discoveryLens: string;
-  isOfficialSegment: boolean;
-  valueDriverHypothesis: string;
-  researchQuestions: string[];
+  discovery_lens: string;
+  is_official_segment: boolean;
+  official_segment_name?: string;
+  value_driver_hypothesis: string;
+  research_questions: string[];
+  evidence_ids?: string[];
 }
 
 export interface ResearchGroup {
-  groupId: string;
+  group_id: string;
   name: string;
   theme: string;
-  verticalIds: string[];
-  keyQuestions: string[];
-  groupingRationale: string;
-  sharedContext: string;
+  vertical_ids: string[];
+  key_questions: string[];
+  grouping_rationale: string;
+  shared_context: string;
+  valuation_approach?: string;
+  focus?: string;
 }
 
 export interface DiscoveryOutput {
-  officialSegments: string[];
-  researchThreads: DiscoveredThread[];
-  researchGroups: ResearchGroup[];
-  crossCuttingThemes: string[];
-  optionalityCandidates: string[];
-  dataGaps: string[];
+  official_segments: string[];
+  research_threads: DiscoveredThread[];
+  research_groups: ResearchGroup[];
+  cross_cutting_themes: string[];
+  optionality_candidates: string[];
+  data_gaps: string[];
+  conflicting_signals?: string[];
+  evidence_ids?: string[];
+  thread_briefs?: unknown[];
+  searches_performed?: Array<{ lens: string; query: string; key_finding?: string }>;
 }
 
 export interface VerticalAnalysis {
-  threadId: string;
-  verticalName: string;
-  businessUnderstanding: string;
-  overallConfidence: number;
+  thread_id: string;
+  vertical_name: string;
+  business_understanding: string;
+  evidence_ids?: string[];
+  overall_confidence: number;
 }
 
 export interface SynthesisOutput {
-  fullReport: string;
-  investmentView: 'BUY' | 'HOLD' | 'SELL';
+  full_report: string;
+  investment_view: 'BUY' | 'HOLD' | 'SELL';
   conviction: 'high' | 'medium' | 'low' | 'high-medium' | 'medium-low';
-  overallConfidence: number;
-  thesisSummary: string;
-  synthesizerModel: 'claude' | 'gpt';
+  overall_confidence: number;
+  thesis_summary: string;
+  synthesizer_model: 'claude' | 'gpt';
 }
 
 export interface EditorialFeedback {
-  preferredSynthesis: 'claude' | 'gpt';
-  preferenceReasoning: string;
-  claudeScore: number;
-  gptScore: number;
-  keyDifferentiators: string[];
-  revisionInstructions: string;
-  recommendedConfidence: number;
-  keyStrengths: string[];
-  keyWeaknesses: string[];
+  preferred_synthesis: 'claude' | 'gpt';
+  preference_reasoning: string;
+  claude_score: number;
+  gpt_score: number;
+  key_differentiators: string[];
+  revision_instructions: string;
+  recommended_confidence: number;
+  key_strengths: string[];
+  key_weaknesses: string[];
 }
 
 export interface CompletedRun {

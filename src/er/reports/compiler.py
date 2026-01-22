@@ -418,19 +418,19 @@ class ReportCompiler:
             self._citation_counter += 1
             citation_id = f"[{self._citation_counter}]"
 
-            # Extract source info
-            source_type = fact.source_type or "Unknown"
-            source_date = ""
-            if fact.source_date:
-                source_date = fact.source_date.strftime("%Y-%m-%d")
+            # Extract source info from the original_fact inside VerifiedFact
+            original = fact.original_fact
+            source_type = original.source or "Unknown"
+            # source_date is already a string in Fact, not a datetime
+            source_date = original.source_date or ""
 
             citations.append(
                 Citation(
                     citation_id=citation_id,
                     source_type=source_type,
                     source_date=source_date,
-                    source_url=fact.source_url,
-                    excerpt=fact.statement[:200] if fact.statement else "",
+                    source_url=None,  # Fact doesn't have source_url field
+                    excerpt=original.statement[:200] if original.statement else "",
                 )
             )
 

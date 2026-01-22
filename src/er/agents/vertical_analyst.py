@@ -15,6 +15,8 @@ from typing import Any
 
 from er.agents.base import Agent, AgentContext
 from er.llm.openai_client import OpenAIClient
+from er.retrieval.evidence_cards import EvidenceCardGenerator
+from er.retrieval.fetch import WebFetcher
 from er.types import (
     CompanyContext,
     DiscoveredThread,
@@ -66,6 +68,10 @@ Research Group: **{group_name}**
 Theme: {group_theme}
 Focus: {group_focus}
 
+## REVIEWER GUIDANCE (APPLIES TO THIS GROUP)
+
+{review_guidance_section}
+
 ### Verticals to Research:
 {verticals_detail}
 
@@ -97,6 +103,14 @@ Do NOT:
 - Ignore the research questions and do your own thing
 - Skip verticals Discovery assigned to you
 - Invent new verticals (that was Discovery's job)
+
+## RECENCY ADDENDUM (30/60/90 DAYS)
+
+If a vertical includes recent developments, you MUST:
+- Expand or refine the discovery questions based on those updates
+- Address each development explicitly in your analysis
+- Surface any newly created uncertainties
+ - Bucket those developments into 30d / 60d / 90d windows
 
 ## MANDATORY WEB SEARCHES
 
@@ -211,11 +225,12 @@ DO:
 - Competitive dynamics: What's changing in the market?
 - Moat characteristics: What advantages exist? Are they strengthening or weakening?
 
-### Recent Developments (last 60 days)
-List 3-5 key events with dates and sources. For each:
+### Recent Developments (last 30/60/90 days)
+List developments in three buckets (30d, 60d, 90d). If nothing material was found for a bucket, say so explicitly.
+For each development:
 - What happened
 - Factual impact on this vertical
-- Source (publication name)
+- Source (publication name) and date
 
 ### Growth Dynamics
 **Tailwinds** (factors that could accelerate growth):
@@ -381,6 +396,94 @@ class VerticalAnalystAgent(Agent):
 
         return evidence_ids
 
+    async def _ingest_deep_research_citations(
+        self,
+        response_metadata: dict[str, Any] | None,
+        run_state: RunState,
+        research_group: ResearchGroup,
+    ) -> list[str]:
+        """Fetch and store deep research citations as evidence cards.
+
+        Returns a list of evidence IDs (summary + raw) for downstream citation use.
+        """
+        if not response_metadata:
+            return []
+
+        annotations = response_metadata.get("annotations", [])
+        urls = [
+            a.get("url") for a in annotations
+            if isinstance(a, dict) and a.get("url")
+        ]
+        if not urls:
+            return []
+
+        # Dedupe and filter invalid URLs
+        deduped_urls: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            if not isinstance(url, str):
+                continue
+            if not (url.startswith("http://") or url.startswith("https://")):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            deduped_urls.append(url)
+
+        if not deduped_urls:
+            return []
+
+        fetcher = WebFetcher(self.evidence_store)
+        card_generator = EvidenceCardGenerator(
+            self.llm_router,
+            self.evidence_store,
+            self.workspace_store,
+        )
+
+        try:
+            fetch_results = await fetcher.fetch_many(deduped_urls)
+            successful = [fr for fr in fetch_results if fr.success]
+            cards = await card_generator.generate_cards(
+                successful,
+                query_context=f"Deep research citations for {run_state.ticker} ({research_group.name})",
+            )
+        finally:
+            await fetcher.close()
+
+        evidence_ids: list[str] = []
+        for card in cards:
+            if card.summary_evidence_id:
+                evidence_ids.append(card.summary_evidence_id)
+            if card.raw_evidence_id:
+                evidence_ids.append(card.raw_evidence_id)
+
+        # Deduplicate, preserve order
+        evidence_ids = list(dict.fromkeys(evidence_ids))
+
+        if self.workspace_store and evidence_ids:
+            self.workspace_store.put_artifact(
+                artifact_type="deep_research_citations",
+                producer=self.name,
+                json_obj={
+                    "group_id": research_group.group_id,
+                    "group_name": research_group.name,
+                    "urls": deduped_urls,
+                    "evidence_ids": evidence_ids,
+                },
+                summary=f"Deep research citations for {research_group.name}",
+                evidence_ids=evidence_ids,
+            )
+
+        self.log_info(
+            "Ingested deep research citations",
+            ticker=run_state.ticker,
+            group=research_group.name,
+            urls=len(deduped_urls),
+            evidence_ids=len(evidence_ids),
+        )
+
+        return evidence_ids
+
     async def run_group(
         self,
         run_state: RunState,
@@ -390,6 +493,7 @@ class VerticalAnalystAgent(Agent):
         use_deep_research: bool = True,
         other_groups: list[tuple[ResearchGroup, list[DiscoveredThread]]] | None = None,
         discovery_output: DiscoveryOutput | None = None,
+        review_guidance: str | None = None,
         **kwargs: Any,
     ) -> GroupResearchOutput:
         """Execute Stage 3: Deep Research for a research group.
@@ -418,10 +522,22 @@ class VerticalAnalystAgent(Agent):
 
         run_state.phase = Phase.VERTICALS
 
+        brief_map: dict[str, ThreadBrief] = {}
+        if discovery_output and discovery_output.thread_briefs:
+            brief_map = {tb.thread_id: tb for tb in discovery_output.thread_briefs}
+
         # Build verticals detail section
         verticals_detail = ""
         for i, thread in enumerate(threads, 1):
             questions = "\n".join(f"      - {q}" for q in thread.research_questions)
+            recency_details = ""
+            brief = brief_map.get(thread.thread_id)
+            if brief and brief.recent_developments:
+                recency_lines = "\n".join(f"      - {d}" for d in brief.recent_developments)
+                recency_details += f"\n- Recent Developments (last 30/60/90 days):\n{recency_lines}\n"
+            if brief and brief.recency_questions:
+                recency_questions = "\n".join(f"      - {q}" for q in brief.recency_questions)
+                recency_details += f"\n- Recency Expansion Questions:\n{recency_questions}\n"
             verticals_detail += f"""
 **Vertical {i}: {thread.name}**
 - Type: {thread.thread_type.value}
@@ -430,6 +546,7 @@ class VerticalAnalystAgent(Agent):
 - Hypothesis: {thread.value_driver_hypothesis}
 - Research Questions:
 {questions}
+{recency_details}
 """
 
         # Build other groups detail for co-analyst coordination
@@ -444,6 +561,13 @@ class VerticalAnalystAgent(Agent):
 """
         else:
             other_groups_detail = "(No other groups - you are the only analyst)"
+
+        guidance_blocks = []
+        if review_guidance:
+            guidance_blocks.append(f"Global guidance: {review_guidance}")
+        if research_group.review_guidance:
+            guidance_blocks.append(f"Group guidance: {research_group.review_guidance}")
+        review_guidance_section = "\n".join(guidance_blocks) if guidance_blocks else "No additional guidance provided."
 
         # Build the prompt
         now = datetime.now(timezone.utc)
@@ -468,6 +592,7 @@ class VerticalAnalystAgent(Agent):
             group_name=research_group.name,
             group_theme=research_group.theme,
             group_focus=research_group.focus,
+            review_guidance_section=review_guidance_section,
             verticals_detail=verticals_detail,
             other_groups_detail=other_groups_detail,
             company_context=company_context.for_deep_research(thread_names),
@@ -522,6 +647,15 @@ class VerticalAnalystAgent(Agent):
                 phase="verticals",
             )
 
+        # Ingest deep research citations (URLs -> EvidenceCards) if available
+        citation_evidence_ids: list[str] = []
+        if use_deep_research:
+            citation_evidence_ids = await self._ingest_deep_research_citations(
+                response.metadata,
+                run_state,
+                research_group,
+            )
+
         # Build per-thread evidence ID maps for parsing
         thread_evidence_map: dict[str, list[str]] = {}
         for thread in threads:
@@ -529,12 +663,18 @@ class VerticalAnalystAgent(Agent):
                 thread, discovery_output, company_context
             )
 
+        if citation_evidence_ids:
+            for thread_id, ids in thread_evidence_map.items():
+                thread_evidence_map[thread_id] = list(dict.fromkeys(citation_evidence_ids + ids))
+
+        base_evidence_ids = tuple(dict.fromkeys(list(citation_evidence_ids) + list(company_context.evidence_ids)))
+
         # Parse the response with per-thread evidence IDs
         group_output = self._parse_group_response(
             response.content,
             research_group,
             threads,
-            company_context.evidence_ids,
+            base_evidence_ids,
             thread_evidence_map,
         )
 
@@ -608,6 +748,7 @@ class VerticalAnalystAgent(Agent):
                     statement=f"Financial metric: {match}",
                     category=FactCategory.FINANCIAL,
                     evidence_id=default_evidence_id,
+                    evidence_ids=list(base_evidence_ids),
                     source="Company financials (JSON)",
                     confidence=0.9,
                     vertical_id=thread_id,
@@ -633,6 +774,7 @@ class VerticalAnalystAgent(Agent):
                     statement=f"Market share: {match}",
                     category=FactCategory.COMPETITIVE,
                     evidence_id=default_evidence_id,
+                    evidence_ids=list(base_evidence_ids),
                     source="Web research",
                     confidence=0.6,
                     vertical_id=thread_id,
@@ -658,6 +800,7 @@ class VerticalAnalystAgent(Agent):
                         statement=item.strip(),
                         category=FactCategory.DEVELOPMENT,
                         evidence_id=default_evidence_id,
+                        evidence_ids=list(base_evidence_ids),
                         source="Web research",
                         confidence=0.5,
                         vertical_id=thread_id,
@@ -679,6 +822,7 @@ class VerticalAnalystAgent(Agent):
                         statement=item.strip(),
                         category=FactCategory.TAILWIND,
                         evidence_id=default_evidence_id,
+                        evidence_ids=list(base_evidence_ids),
                         source="Research analysis",
                         confidence=0.5,
                         vertical_id=thread_id,
@@ -700,6 +844,7 @@ class VerticalAnalystAgent(Agent):
                         statement=item.strip(),
                         category=FactCategory.HEADWIND,
                         evidence_id=default_evidence_id,
+                        evidence_ids=list(base_evidence_ids),
                         source="Research analysis",
                         confidence=0.5,
                         vertical_id=thread_id,
@@ -720,6 +865,7 @@ class VerticalAnalystAgent(Agent):
                     statement=item.strip(),
                     category=FactCategory.RISK,
                     evidence_id=default_evidence_id,
+                    evidence_ids=list(base_evidence_ids),
                     source="Research analysis",
                     confidence=0.5,
                     vertical_id=thread_id,

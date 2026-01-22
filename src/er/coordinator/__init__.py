@@ -3,24 +3,18 @@ Coordinator package.
 
 This package implements the research orchestration:
 - Event store for message logging
-- Phase transitions
-- Agent coordination
-- Budget management
-- 5-stage pipeline
+- Agent research pipeline using Claude Agent SDK
+- Multi-agent architecture (Anthropic's pattern)
 """
 
 from er.coordinator.event_store import EventStore
-from er.coordinator.pipeline import (
-    PipelineConfig,
-    PipelineResult,
+from er.coordinator.anthropic_sdk_agent import (
     ResearchPipeline,
-    run_research,
+    PipelineResult,
 )
 
 __all__ = [
     "EventStore",
-    "PipelineConfig",
-    "PipelineResult",
     "ResearchPipeline",
-    "run_research",
+    "PipelineResult",
 ]

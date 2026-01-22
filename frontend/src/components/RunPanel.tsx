@@ -3,24 +3,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Square, Clock, DollarSign, TrendingUp, AlertCircle } from 'lucide-react';
-import { cn, formatDuration, formatCost, getCostClass, formatPercentage } from '@/lib/utils';
+import { cn, formatDuration, formatCost, getCostClass } from '@/lib/utils';
 import { PipelineStages, PipelineProgress } from './PipelineStages';
 import { useResearchStore } from '@/store/research';
 import api, { type StageEvent } from '@/lib/api';
-import type { Stage, StageStatus } from '@/types';
+import type { StageStatus } from '@/types';
 
 interface RunPanelProps {
   className?: string;
 }
-
-const DEFAULT_STAGES: Stage[] = [
-  { id: 1, name: 'Data Collection', shortName: 'DATA', status: 'pending' },
-  { id: 2, name: 'Discovery', shortName: 'DISC', status: 'pending' },
-  { id: 3, name: 'Deep Research', shortName: 'DEEP', status: 'pending' },
-  { id: 4, name: 'Dual Synthesis', shortName: 'SYNTH', status: 'pending' },
-  { id: 5, name: 'Editorial Review', shortName: 'EDIT', status: 'pending' },
-  { id: 6, name: 'Final Report', shortName: 'FINAL', status: 'pending' },
-];
 
 export function RunPanel({ className }: RunPanelProps) {
   const [ticker, setTicker] = useState('');
@@ -29,7 +20,7 @@ export function RunPanel({ className }: RunPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
-  const { run, startRun, updateStage, updateCost, completeRun, setError: setRunError, setFinalReport, setSelectedTab } = useResearchStore();
+  const { run, startRun, updateStage, updateCost, completeRun, setError: setRunError, setSelectedTab } = useResearchStore();
 
   // Timer for elapsed time
   useEffect(() => {
@@ -51,9 +42,14 @@ export function RunPanel({ className }: RunPanelProps) {
 
     switch (event.type) {
       case 'stage_update':
-        if (event.data.stage && event.data.status) {
-          updateStage(event.data.stage, {
-            status: event.data.status as StageStatus,
+        if ((event.stage || event.data.stage) && event.data.status) {
+          const status = event.data.status === 'complete'
+            ? 'complete'
+            : event.data.status === 'error'
+              ? 'error'
+              : 'running';
+          updateStage((event.stage || event.data.stage) as number, {
+            status: status as StageStatus,
             detail: event.data.detail,
           });
         }
@@ -72,8 +68,9 @@ export function RunPanel({ className }: RunPanelProps) {
         }
         break;
 
+      case 'run_error':
       case 'error':
-        setRunError(event.data.message || 'Unknown error');
+        setRunError(event.data.error || event.data.message || 'Unknown error');
         break;
     }
   }, [updateStage, updateCost, completeRun, setRunError]);
@@ -255,7 +252,6 @@ export function RunPanel({ className }: RunPanelProps) {
               {/* Stage list */}
               <PipelineStages
                 stages={run.stages}
-                currentStage={run.currentStage}
               />
 
               {/* Cancel button */}

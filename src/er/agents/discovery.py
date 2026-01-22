@@ -10,12 +10,15 @@ Model: GPT-5.2 (with reasoning_effort: high + web_search_preview tool)
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
-from er.llm.base import LLMRequest
-from er.llm.openai_client import OpenAIClient
+from er.llm.router import AgentRole
+from er.retrieval.service import WebResearchService
 from er.types import (
     CompanyContext,
     DiscoveredThread,
@@ -33,6 +36,8 @@ from er.utils.dates import (
     format_quarters_for_prompt,
 )
 
+WEB_SEARCH_TIMEOUT_SECONDS = 180
+
 
 # Discovery prompt template - 7 Mandatory Lenses
 DISCOVERY_PROMPT = """You are the Discovery Agent for an institutional equity research system.
@@ -44,6 +49,22 @@ TICKER: {ticker}
 COMPANY: {company_name}
 
 Your job is to find ALL value drivers - especially ones NOT in official segment reporting. The official 10-K segments are your STARTING POINT, not your answer.
+
+## TRAINING DATA IS STALE (READ TWICE)
+
+Assume your pretraining is outdated. New competitors, products, pricing, regulatory changes,
+and market narratives can emerge in the last 30/60/90 days. You MUST use live web_search to
+refresh your priors before finalizing threads. If recent evidence is missing, explicitly
+state that and propose the missing searches.
+
+## TRANSCRIPT-DRIVEN SEARCHES (MANDATORY)
+
+From the latest earnings transcript, extract concrete entities and initiatives (product names,
+new partnerships, model releases, pricing changes, capex programs). Use those as search queries.
+If the transcript mentions a new initiative, you MUST run at least one web_search on it.
+
+Transcript-derived search seeds (use these):
+{transcript_search_seeds}
 
 ## GROUND TRUTH DATA
 
@@ -132,6 +153,9 @@ You MUST complete ALL 7 lenses below. Each lens has REQUIRED SEARCHES and REQUIR
 If you skip a lens or give vague output, you have failed.
 
 If a lens produces nothing meaningful, explicitly state "No findings" with reasoning.
+
+Before writing conclusions, do a RECENCY REFRESH: prioritize the last 30/60/90 days and
+assume anything "latest" in your training data is stale until confirmed by search.
 
 ---
 
@@ -272,6 +296,8 @@ If nothing found, output: "No major developments in last 90 days"
 - What's the stated strategic priority?
 - Any initiatives mentioned that aren't in segment data?
 - Copy EXACT QUOTES for important statements
+
+Note: The latest transcript is included in full text. Use it as your recency anchor.
 
 **Required Output Fields:**
 - top_priority (exact quote from transcript)
@@ -522,7 +548,7 @@ class DiscoveryAgent(Agent):
     3. Using web search for recent information
     4. Outputting 3-5 prioritized research threads
 
-    Uses GPT-5.2 with web search for web-enhanced discovery.
+    Uses provider-specific web search/grounding for web-enhanced discovery.
     """
 
     def __init__(self, context: AgentContext) -> None:
@@ -532,7 +558,7 @@ class DiscoveryAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
-        self._openai_client: OpenAIClient | None = None
+        self._web_research_service: WebResearchService | None = None
 
     @property
     def name(self) -> str:
@@ -542,13 +568,184 @@ class DiscoveryAgent(Agent):
     def role(self) -> str:
         return "Find all value drivers using 7 lenses with web search"
 
-    async def _get_openai_client(self) -> OpenAIClient:
-        """Get or create OpenAI client."""
-        if self._openai_client is None:
-            self._openai_client = OpenAIClient(
-                api_key=self.settings.OPENAI_API_KEY,
+    async def _get_web_research_service(self) -> WebResearchService:
+        """Get or create WebResearchService for evidence enrichment."""
+        if self._web_research_service is None:
+            self._web_research_service = WebResearchService(
+                llm_router=self.llm_router,
+                evidence_store=self.evidence_store,
+                workspace_store=self.workspace_store,
             )
-        return self._openai_client
+        return self._web_research_service
+
+    async def _extract_transcript_search_seeds(
+        self,
+        company_context: CompanyContext,
+        max_queries: int = 8,
+    ) -> list[str]:
+        """Extract transcript-driven search queries from the latest transcript."""
+        transcripts = company_context.transcripts or []
+        if not transcripts:
+            return []
+
+        latest_idx = 0
+        latest_dt = None
+        for idx, t in enumerate(transcripts):
+            dt = None
+            date_str = t.get("date")
+            if date_str:
+                try:
+                    dt = datetime.fromisoformat(date_str)
+                except ValueError:
+                    dt = None
+            if dt is None:
+                year = t.get("year")
+                quarter = t.get("quarter")
+                if year and quarter:
+                    try:
+                        dt = datetime(int(year), int(quarter) * 3, 1)
+                    except (TypeError, ValueError):
+                        dt = None
+            if dt and (latest_dt is None or dt > latest_dt):
+                latest_dt = dt
+                latest_idx = idx
+
+        transcript = transcripts[latest_idx]
+        transcript_text = (
+            transcript.get("full_text")
+            or transcript.get("text")
+            or transcript.get("content")
+            or ""
+        )
+        if not transcript_text:
+            return []
+
+        excerpt = transcript_text[:4000]
+        prompt = f"""Extract {max_queries} web search queries from this earnings transcript excerpt.
+Focus on concrete initiatives, product names, model releases, partnerships, pricing changes,
+capex programs, and regulatory or market issues mentioned.
+Return ONLY JSON:
+{{"queries": ["query 1", "query 2", ...]}}
+
+Transcript excerpt:
+{excerpt}
+        """
+        try:
+            response = await self.llm_router.call(
+                role=AgentRole.WORKHORSE,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                response_format={"type": "json_object"},
+                agent_name=self.name,
+                phase="discovery",
+            )
+            content = response.get("content", "") or ""
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                start = content.find("{")
+                end = content.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    data = json.loads(content[start : end + 1])
+                else:
+                    data = {}
+            queries = data.get("queries", [])
+        except Exception as e:
+            self.log_warning("Failed to extract transcript search seeds", error=str(e))
+            return []
+
+        if not isinstance(queries, list):
+            return []
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for q in queries:
+            if not isinstance(q, str):
+                continue
+            query = q.strip()
+            if not query:
+                continue
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(query)
+
+        return cleaned[:max_queries]
+
+    def _map_threads_to_official_segments(
+        self,
+        threads: list[DiscoveredThread],
+        official_segments: list[str],
+    ) -> list[DiscoveredThread]:
+        """Attach official segment names to segment threads when missing."""
+        segment_names = [seg for seg in official_segments if seg]
+        if not segment_names or not threads:
+            return threads
+
+        stopwords = {
+            "and", "or", "the", "of", "to", "for", "other", "segment", "segments",
+            "business", "services", "service", "products", "product", "co", "corp",
+            "corporation", "company", "inc", "ltd", "group",
+        }
+
+        def normalize(text: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+        def tokens(text: str) -> set[str]:
+            return {t for t in normalize(text).split() if t and t not in stopwords}
+
+        segment_tokens = {seg: tokens(seg) for seg in segment_names}
+        segment_norm = {seg: normalize(seg) for seg in segment_names}
+
+        updated: list[DiscoveredThread] = []
+        for thread in threads:
+            if thread.official_segment_name or thread.is_official_segment:
+                updated.append(thread)
+                continue
+            if thread.thread_type != ThreadType.SEGMENT:
+                updated.append(thread)
+                continue
+
+            thread_text = " ".join([
+                thread.name or "",
+                thread.description or "",
+                thread.value_driver_hypothesis or "",
+            ])
+            thread_norm = normalize(thread_text)
+            thread_tokens = tokens(thread_text)
+
+            best_seg = None
+            best_score = 0.0
+
+            for seg in segment_names:
+                seg_norm = segment_norm[seg]
+                if seg_norm and seg_norm in thread_norm:
+                    best_seg = seg
+                    best_score = 1.0
+                    break
+
+                seg_tokens = segment_tokens[seg]
+                if not seg_tokens:
+                    continue
+                overlap = thread_tokens & seg_tokens
+                if not overlap:
+                    continue
+                score = len(overlap) / max(len(seg_tokens), 1)
+                if score > best_score:
+                    best_score = score
+                    best_seg = seg
+
+            if best_seg and best_score >= 0.2:
+                updated.append(replace(
+                    thread,
+                    is_official_segment=True,
+                    official_segment_name=best_seg,
+                ))
+            else:
+                updated.append(thread)
+
+        return updated
 
     async def run(
         self,
@@ -587,6 +784,20 @@ class DiscoveryAgent(Agent):
         latest_quarter = format_quarter(latest_year, latest_qtr)
         quarter_context = format_quarters_for_prompt(latest_year, latest_qtr)
 
+        transcript_seeds = await self._extract_transcript_search_seeds(company_context)
+        if transcript_seeds:
+            transcript_seed_block = "\n".join(f"- {q}" for q in transcript_seeds)
+        else:
+            transcript_seed_block = "- (none)"
+
+        if self.workspace_store:
+            self.workspace_store.put_artifact(
+                artifact_type="transcript_search_seeds",
+                producer=self.name,
+                json_obj={"queries": transcript_seeds},
+                summary=f"Transcript-derived search seeds: {len(transcript_seeds)}",
+            )
+
         prompt = DISCOVERY_PROMPT.format(
             date=today,
             current_month=current_month,
@@ -596,33 +807,62 @@ class DiscoveryAgent(Agent):
             company_context=company_context.for_discovery(),
             latest_quarter=latest_quarter,
             quarter_context=quarter_context,
+            transcript_search_seeds=transcript_seed_block,
         )
-
-        # Get OpenAI client
-        openai = await self._get_openai_client()
 
         # Build request - high max_tokens for reasoning + web search + output
-        request = LLMRequest(
-            messages=[{"role": "user", "content": prompt}],
-            model="gpt-5.2",
-            temperature=0.3,
-            max_tokens=100000,
-        )
+        messages = [{"role": "user", "content": prompt}]
+        max_tokens = 100000
 
         # Run discovery
         if use_web_search:
-            # Use GPT-5.2 with web search enabled
-            self.log_info("Using GPT-5.2 with web search", ticker=run_state.ticker)
-            response = await openai.complete_with_web_search(
-                request,
-                reasoning_effort=reasoning_effort,
-            )
+            # Use provider-specific web search/grounding
+            self.log_info("Using web search", ticker=run_state.ticker)
+            try:
+                response = await asyncio.wait_for(
+                    self.llm_router.complete_with_web_search(
+                        role=AgentRole.DISCOVERY,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                        agent_name=self.name,
+                        phase=run_state.phase.value if hasattr(run_state.phase, "value") else run_state.phase,
+                    ),
+                    timeout=WEB_SEARCH_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                self.log_warning(
+                    "Web search timed out, falling back to reasoning-only",
+                    timeout_seconds=WEB_SEARCH_TIMEOUT_SECONDS,
+                )
+                response = await self.llm_router.complete(
+                    role=AgentRole.DISCOVERY,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    agent_name=self.name,
+                    phase=run_state.phase.value if hasattr(run_state.phase, "value") else run_state.phase,
+                )
+            except Exception as e:
+                self.log_warning(
+                    "Web search failed, falling back to reasoning-only",
+                    error=str(e),
+                )
+                response = await self.llm_router.complete(
+                    role=AgentRole.DISCOVERY,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    agent_name=self.name,
+                    phase=run_state.phase.value if hasattr(run_state.phase, "value") else run_state.phase,
+                )
         else:
             # Use regular GPT-5.2 with reasoning (no web search)
-            self.log_info("Using GPT-5.2 with reasoning (no web search)", ticker=run_state.ticker)
-            response = await openai.complete_with_reasoning(
-                request,
-                reasoning_effort="high",
+            self.log_info("Using reasoning (no web search)", ticker=run_state.ticker)
+            response = await self.llm_router.complete(
+                role=AgentRole.DISCOVERY,
+                messages=messages,
+                max_tokens=max_tokens,
+                agent_name=self.name,
+                phase=run_state.phase.value if hasattr(run_state.phase, "value") else run_state.phase,
             )
 
         # Record cost
@@ -641,6 +881,14 @@ class DiscoveryAgent(Agent):
             response.content,
             company_context.evidence_ids,
         )
+
+        # Enrich internal discovery with evidence cards from searches (best-effort)
+        if use_web_search and discovery_output.searches_performed:
+            await self._enrich_with_search_evidence(
+                run_state=run_state,
+                company_context=company_context,
+                discovery_output=discovery_output,
+            )
 
         # Store ThreadBriefs in WorkspaceStore for downstream stages
         if self.workspace_store and discovery_output.thread_briefs:
@@ -823,6 +1071,12 @@ class DiscoveryAgent(Agent):
                 else:
                     official_segments.append(str(seg))
 
+        # Attach official segment names to segment threads when missing
+        research_threads = self._map_threads_to_official_segments(
+            research_threads,
+            official_segments,
+        )
+
         # Parse cross-cutting themes from lens_outputs.blind_spots or cross_cutting_themes
         cross_cutting = []
         blind_spots = lens_outputs.get("blind_spots", {})
@@ -934,10 +1188,107 @@ class DiscoveryAgent(Agent):
             conflicting_signals=data.get("conflicting_signals", []),
             evidence_ids=list(base_evidence_ids),
             thread_briefs=thread_briefs,
+            searches_performed=data.get("searches_performed", []),
         )
+
+    async def _enrich_with_search_evidence(
+        self,
+        run_state: RunState,
+        company_context: CompanyContext,
+        discovery_output: DiscoveryOutput,
+    ) -> None:
+        """Fetch evidence cards for internal discovery searches.
+
+        Uses searches_performed to run evidence-first retrieval and maps
+        evidence IDs to threads by discovery_lens.
+        """
+        searches = discovery_output.searches_performed
+        queries = [s.get("query") for s in searches if s.get("query")]
+        if not queries:
+            return
+
+        self.log_info(
+            "Enriching discovery with evidence cards",
+            ticker=run_state.ticker,
+            queries=len(queries),
+        )
+
+        web_service = await self._get_web_research_service()
+        results = await web_service.research_batch(
+            queries=queries,
+            max_results_per_query=2,
+            recency_days=90,
+            max_total_queries=len(queries),
+        )
+
+        results_by_query = {result.query: result for result in results}
+        lens_to_evidence: dict[str, list[str]] = {}
+        for search in searches:
+            query = search.get("query")
+            if not query:
+                continue
+            result = results_by_query.get(query)
+            if not result:
+                continue
+
+            search["urls_found"] = [r.url for r in result.search_results]
+            search["cards_generated"] = len(result.evidence_cards)
+
+            lens = search.get("lens", "")
+            if not lens:
+                continue
+            if result.evidence_ids:
+                lens_to_evidence.setdefault(lens, [])
+                for eid in result.evidence_ids:
+                    if eid not in lens_to_evidence[lens]:
+                        lens_to_evidence[lens].append(eid)
+
+        # Update thread evidence IDs (DiscoveredThread is frozen; replace)
+        updated_threads = []
+        for thread in discovery_output.research_threads:
+            lens_evidence = lens_to_evidence.get(thread.discovery_lens, [])
+            if lens_evidence:
+                merged = list(thread.evidence_ids)
+                for eid in lens_evidence:
+                    if eid not in merged:
+                        merged.append(eid)
+                updated_threads.append(replace(thread, evidence_ids=tuple(merged)))
+            else:
+                updated_threads.append(thread)
+        discovery_output.research_threads = updated_threads
+
+        # Update ThreadBrief evidence IDs
+        if discovery_output.thread_briefs:
+            thread_index = {t.thread_id: t for t in updated_threads}
+            for brief in discovery_output.thread_briefs:
+                thread = thread_index.get(brief.thread_id)
+                if not thread:
+                    continue
+                lens_evidence = lens_to_evidence.get(thread.discovery_lens, [])
+                for eid in lens_evidence:
+                    if eid not in brief.key_evidence_ids:
+                        brief.key_evidence_ids.append(eid)
+
+        # Update overall discovery evidence IDs
+        merged_evidence = list(discovery_output.evidence_ids)
+        for lens_evidence in lens_to_evidence.values():
+            for eid in lens_evidence:
+                if eid not in merged_evidence:
+                    merged_evidence.append(eid)
+        discovery_output.evidence_ids = merged_evidence
+
+        # Store searches metadata as artifact for traceability
+        if self.workspace_store:
+            self.workspace_store.put_artifact(
+                artifact_type="discovery_searches",
+                producer=self.name,
+                json_obj={"searches": searches},
+                summary=f"Internal discovery searches: {len(searches)} queries",
+                evidence_ids=merged_evidence[:10],
+            )
 
     async def close(self) -> None:
         """Close any open clients."""
-        if self._openai_client:
-            await self._openai_client.close()
-            self._openai_client = None
+        if self._web_research_service:
+            await self._web_research_service.close()
+            self._web_research_service = None

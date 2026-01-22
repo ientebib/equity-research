@@ -19,7 +19,11 @@ from er.types import (
 def mock_context() -> AgentContext:
     """Create mock agent context."""
     context = MagicMock(spec=AgentContext)
-    context.llm_router = AsyncMock()
+    context.llm_router = MagicMock()
+    context.llm_router.openai_client = MagicMock()
+    context.llm_router.openai_client.chat = AsyncMock(
+        return_value={"content": "{\"results\": []}"}
+    )
     context.workspace_store = MagicMock()
     context.evidence_store = MagicMock()
     context.budget_tracker = MagicMock()

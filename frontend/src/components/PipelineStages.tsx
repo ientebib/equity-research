@@ -7,7 +7,6 @@ import type { Stage, StageStatus } from '@/types';
 
 interface PipelineStagesProps {
   stages: Stage[];
-  currentStage?: number;
   className?: string;
 }
 
@@ -25,7 +24,7 @@ const statusColors: Record<StageStatus, string> = {
   error: 'text-[var(--kp-red)] border-[var(--kp-red)]',
 };
 
-export function PipelineStages({ stages, currentStage, className }: PipelineStagesProps) {
+export function PipelineStages({ stages, className }: PipelineStagesProps) {
   return (
     <div className={cn('space-y-1', className)}>
       {stages.map((stage, idx) => (

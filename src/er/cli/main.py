@@ -228,6 +228,14 @@ def analyze(
         Optional[Path],
         typer.Option("--resume", help="Resume from a previous run directory (e.g., output/run_GOOGL_20251224_140000)"),
     ] = None,
+    simple: Annotated[
+        bool,
+        typer.Option("--simple", "-s", help="Use simplified 3-stage pipeline with Anthropic research"),
+    ] = False,
+    agent_sdk: Annotated[
+        bool,
+        typer.Option("--agent-sdk", "-a", help="Use Claude Agent SDK multi-agent pipeline (best quality, highest cost)"),
+    ] = False,
 ) -> None:
     """Run equity research analysis on a stock ticker.
 
@@ -236,6 +244,8 @@ def analyze(
     - Excel model with projections
     - Evidence citations
     - Full audit log
+
+    Use --simple for a streamlined 3-stage pipeline that actually works.
     """
     # Load settings
     settings = _get_settings_safe()
@@ -383,8 +393,93 @@ def analyze(
             run_state.phase = Phase.COMPLETE
             run_manifest.complete(success=True)
             run_manifest.save()
+    elif agent_sdk:
+        # Use Claude Agent SDK multi-agent pipeline
+        import asyncio
+        from er.coordinator.agent_pipeline import AgentResearchPipeline
+        from er.logging import setup_logging
+
+        setup_logging(log_level="DEBUG" if verbose else "INFO", log_file=run_output_dir / "run.log")
+
+        console.print("\n[bold magenta]Using Claude Agent SDK multi-agent pipeline...[/bold magenta]")
+        console.print("[dim]This architecture mirrors Anthropic's deep research system:[/dim]")
+        console.print("[dim]  - Parallel research subagents (Sonnet)[/dim]")
+        console.print("[dim]  - Synthesis with Opus 4.5[/dim]")
+        console.print("[dim]  - Isolated context windows per subagent[/dim]")
+        console.print()
+
+        try:
+            pipeline = AgentResearchPipeline(
+                output_dir=run_output_dir,
+                max_threads=8,
+                enable_verification=True,
+            )
+            result = asyncio.run(pipeline.run(ticker))
+
+            # Print summary
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]Research Threads:[/bold] {len(result.threads)}\n"
+                    f"[bold]Report Length:[/bold] {len(result.report):,} chars\n\n"
+                    f"[bold]Report Preview:[/bold]\n{result.report[:800]}...\n\n"
+                    f"[dim]Verification: {result.verification.get('overall_confidence', 'N/A')}[/dim]",
+                    title=f"[bold green]{ticker} Agent SDK Research Complete[/bold green]",
+                    border_style="green",
+                )
+            )
+            console.print(f"\n[bold]Report saved to:[/bold] {run_output_dir / 'report.md'}")
+
+        except Exception as e:
+            error_console.print(f"\n[red]Error:[/red] {e}")
+            import traceback
+            traceback.print_exc()
+            raise typer.Exit(1)
+    elif simple:
+        # Use simplified 3-stage pipeline with Anthropic research
+        import asyncio
+        from er.coordinator.simple_pipeline import SimplePipeline, SimpleConfig
+        from er.logging import setup_logging
+
+        setup_logging(log_level="DEBUG" if verbose else "INFO", log_file=run_output_dir / "run.log")
+
+        console.print("\n[bold cyan]Using simplified 3-stage pipeline with Anthropic research...[/bold cyan]\n")
+
+        simple_config = SimpleConfig(output_dir=effective_output_dir)
+
+        def progress_callback(stage: str, message: str, progress: float) -> None:
+            console.print(f"[dim][{stage}][/dim] {message}")
+
+        try:
+            pipeline = SimplePipeline(
+                settings=settings,
+                config=simple_config,
+                progress_callback=progress_callback,
+            )
+            result = asyncio.run(pipeline.run(ticker))
+
+            # Print summary
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]Executive Summary:[/bold]\n{result.synthesis.executive_summary[:500]}...\n\n"
+                    f"[bold]Valuation:[/bold] {result.synthesis.valuation_summary or 'N/A'}\n\n"
+                    f"[dim]Duration: {result.duration_seconds:.0f}s | "
+                    f"Citations: {result.research_bundle.total_citations} | "
+                    f"Evidence IDs: {len(result.research_bundle.all_evidence_ids)}[/dim]",
+                    title=f"[bold green]{ticker} Research Complete[/bold green]",
+                    border_style="green",
+                )
+            )
+            console.print(f"\n[bold]Report saved to:[/bold] {result.output_dir / 'report.md'}")
+
+        except Exception as e:
+            error_console.print(f"\n[red]Error:[/red] {e}")
+            import traceback
+            traceback.print_exc()
+            raise typer.Exit(1)
     else:
-        # Run the actual pipeline
+        # Run the original complex pipeline
         import asyncio
         from er.coordinator.pipeline import ResearchPipeline, PipelineConfig
         from er.logging import setup_logging

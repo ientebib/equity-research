@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 
 from er.evidence.store import EvidenceStore
 from er.logging import get_logger
+from er.security.sanitizer import InputSanitizer, ThreatLevel
 from er.types import Evidence, SourceTier, ToSRisk
 
 logger = get_logger(__name__)
@@ -86,6 +87,7 @@ class WebFetcher:
         self.timeout = timeout
         self.max_retries = max_retries
         self._client: httpx.AsyncClient | None = None
+        self._sanitizer = InputSanitizer(max_length=100000)
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -130,14 +132,15 @@ class WebFetcher:
         else:
             return ToSRisk.LOW
 
-    def _extract_text(self, html: str) -> tuple[str, str]:
-        """Extract readable text from HTML.
+    def _extract_text(self, html: str, url: str = "") -> tuple[str, str]:
+        """Extract readable text from HTML and sanitize for prompt injection.
 
         Args:
             html: Raw HTML content.
+            url: Source URL for logging.
 
         Returns:
-            Tuple of (title, extracted_text).
+            Tuple of (title, sanitized_extracted_text).
         """
         soup = BeautifulSoup(html, "html.parser")
 
@@ -165,7 +168,21 @@ class WebFetcher:
         if len(text) > 50000:
             text = text[:50000] + "\n...[truncated]"
 
-        return title, text
+        # Sanitize extracted text to prevent prompt injection
+        sanitization_result = self._sanitizer.sanitize(text, source=url or "web_fetch")
+
+        if sanitization_result.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+            logger.warning(
+                "High threat content detected in web fetch",
+                url=url,
+                threat_level=sanitization_result.threat_level.value,
+                threats=sanitization_result.threats_detected,
+            )
+
+        # Sanitize title too
+        title_sanitized = self._sanitizer.sanitize(title, source=f"{url}_title")
+
+        return title_sanitized.sanitized_text, sanitization_result.sanitized_text
 
     async def fetch(
         self,
@@ -189,9 +206,9 @@ class WebFetcher:
                 # Retrieve the full content and re-extract text
                 cached_content = await self.evidence_store.get_blob(existing.evidence_id)
                 if cached_content and existing.content_type == "text/html":
-                    # Re-extract full text from cached HTML
+                    # Re-extract full text from cached HTML (with sanitization)
                     html = cached_content.decode("utf-8", errors="replace")
-                    title, text = self._extract_text(html)
+                    title, text = self._extract_text(html, url=url)
                 else:
                     # Fallback to snippet if content not available
                     title = existing.title or ""
@@ -253,8 +270,8 @@ class WebFetcher:
                 error=last_error,
             )
 
-        # Extract text
-        title, text = self._extract_text(html)
+        # Extract text (with sanitization)
+        title, text = self._extract_text(html, url=url)
 
         # Compute content hash
         content_hash = hashlib.sha256(html.encode()).hexdigest()

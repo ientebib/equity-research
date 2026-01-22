@@ -6,9 +6,9 @@ import api from '@/lib/api';
 import type { StageStatus } from '@/types';
 
 interface SSEEvent {
-  type: string;
+  type?: string;
   timestamp: string;
-  event_type: string;
+  event_type?: string;
   agent_name: string;
   stage: number;
   data: {
@@ -30,15 +30,20 @@ export function useRunStream(runId: string | null) {
   const cleanupRef = useRef<(() => void) | null>(null);
   const { updateStage, updateCost, completeRun, setError } = useResearchStore();
 
-  const handleEvent = useCallback((event: SSEEvent) => {
-    console.log('[SSE]', event.event_type, event);
+const handleEvent = useCallback((event: SSEEvent) => {
+    const eventType = event.type || event.event_type || '';
+    console.log('[SSE]', eventType, event);
 
-    switch (event.event_type) {
-      case 'stage_start':
-      case 'stage_running':
-        if (event.stage) {
+    switch (eventType) {
+      case 'stage_update': {
+        if (event.stage && event.data.status) {
+          const status = event.data.status === 'complete'
+            ? 'complete'
+            : event.data.status === 'error'
+              ? 'error'
+              : 'running';
           updateStage(event.stage, {
-            status: 'running' as StageStatus,
+            status: status as StageStatus,
             detail: event.data.detail,
           });
         }
@@ -46,18 +51,7 @@ export function useRunStream(runId: string | null) {
           updateCost(event.data.cost);
         }
         break;
-
-      case 'stage_complete':
-        if (event.stage) {
-          updateStage(event.stage, {
-            status: 'complete' as StageStatus,
-            detail: event.data.detail,
-          });
-        }
-        if (event.data.cost !== undefined) {
-          updateCost(event.data.cost);
-        }
-        break;
+      }
 
       case 'run_complete':
         if (event.data.verdict) {
@@ -119,6 +113,7 @@ export function useStartRun() {
         quarters: 4,
         use_dual_discovery: true,
         use_deep_research: true,
+        require_discovery_approval: true,
       });
 
       startRun({

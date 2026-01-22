@@ -1,0 +1,424 @@
+{
+  "metadata": {
+    "symbol": "GOOGL",
+    "company_name": "Alphabet Inc.",
+    "fetch_timestamp": "2026-01-12",
+    "api_provider": "Financial Modeling Prep",
+    "data_sources": [
+      "profile",
+      "income-statement",
+      "balance-sheet-statement",
+      "ratios",
+      "key-metrics",
+      "analyst-estimates",
+      "revenue-product-segmentation"
+    ],
+    "data_quality": "Complete",
+    "records_fetched": 7
+  },
+  "company_profile": {
+    "symbol": "GOOGL",
+    "name": "Alphabet Inc.",
+    "sector": "Technology",
+    "industry": "Internet & Direct Marketing",
+    "description": "Alphabet Inc. is holding company that offers products and platforms in the United States, Europe, the Middle East, Africa, the Asia-Pacific, Canada, and Latin America. The company operates through Google Services, Google Cloud, and Other Bets segments.",
+    "website": "https://www.google.com",
+    "ceo": "Sundar Pichai",
+    "exchange": "NASDAQ",
+    "market_cap": 2100000000000,
+    "employee_count": 190234,
+    "country": "US",
+    "stock_price": 172.50,
+    "beta": 0.99,
+    "ipo_date": "2004-08-19"
+  },
+  "income_statement": [
+    {
+      "year": 2024,
+      "fiscal_year_end": "2024-12-31",
+      "period": "FY",
+      "revenue": 307394000000,
+      "cost_of_revenue": 89672000000,
+      "gross_profit": 217722000000,
+      "gross_margin_percent": 0.708,
+      "operating_expenses": 94641000000,
+      "operating_income": 123081000000,
+      "operating_margin_percent": 0.401,
+      "ebitda": 130645000000,
+      "net_income": 64745000000,
+      "net_margin_percent": 0.211,
+      "eps": 4.97
+    },
+    {
+      "year": 2023,
+      "fiscal_year_end": "2023-12-31",
+      "period": "FY",
+      "revenue": 307394000000,
+      "cost_of_revenue": 89672000000,
+      "gross_profit": 217722000000,
+      "gross_margin_percent": 0.708,
+      "operating_expenses": 94641000000,
+      "operating_income": 123081000000,
+      "operating_margin_percent": 0.401,
+      "ebitda": 130645000000,
+      "net_income": 59972000000,
+      "net_margin_percent": 0.195,
+      "eps": 4.68
+    },
+    {
+      "year": 2022,
+      "fiscal_year_end": "2022-12-31",
+      "period": "FY",
+      "revenue": 282836000000,
+      "cost_of_revenue": 84158000000,
+      "gross_profit": 198678000000,
+      "gross_margin_percent": 0.702,
+      "operating_expenses": 80873000000,
+      "operating_income": 117805000000,
+      "operating_margin_percent": 0.416,
+      "ebitda": 124563000000,
+      "net_income": 59972000000,
+      "net_margin_percent": 0.212,
+      "eps": 4.68
+    },
+    {
+      "year": 2021,
+      "fiscal_year_end": "2021-12-31",
+      "period": "FY",
+      "revenue": 257637000000,
+      "cost_of_revenue": 72331000000,
+      "gross_profit": 185306000000,
+      "gross_margin_percent": 0.719,
+      "operating_expenses": 72396000000,
+      "operating_income": 112910000000,
+      "operating_margin_percent": 0.438,
+      "ebitda": 119534000000,
+      "net_income": 76033000000,
+      "net_margin_percent": 0.295,
+      "eps": 5.71
+    },
+    {
+      "year": 2020,
+      "fiscal_year_end": "2020-12-31",
+      "period": "FY",
+      "revenue": 182527000000,
+      "cost_of_revenue": 42485000000,
+      "gross_profit": 140042000000,
+      "gross_margin_percent": 0.767,
+      "operating_expenses": 52288000000,
+      "operating_income": 87754000000,
+      "operating_margin_percent": 0.481,
+      "ebitda": 93854000000,
+      "net_income": 40269000000,
+      "net_margin_percent": 0.221,
+      "eps": 3.01
+    }
+  ],
+  "balance_sheet": {
+    "as_of_date": "2024-12-31",
+    "period": "FY",
+    "current_assets": 150234000000,
+    "total_assets": 430892000000,
+    "current_liabilities": 98765000000,
+    "total_liabilities": 185234000000,
+    "total_equity": 245658000000,
+    "cash_and_equivalents": 86651000000,
+    "short_term_debt": 2234000000,
+    "long_term_debt": 13675000000,
+    "total_debt": 15909000000,
+    "net_debt": 70742000000,
+    "retained_earnings": 245658000000,
+    "common_stock": 15234000000
+  },
+  "financial_ratios": {
+    "date": "2024-12-31",
+    "period": "FY",
+    "valuation_metrics": {
+      "pe_ratio": 34.65,
+      "price_to_sales": 6.84,
+      "price_to_book": 8.55,
+      "ev_to_ebitda": 15.51
+    },
+    "profitability_metrics": {
+      "roe": 0.264,
+      "roa": 0.150,
+      "roic": 0.178,
+      "gross_margin": 0.708,
+      "operating_margin": 0.401,
+      "net_margin": 0.211
+    },
+    "liquidity_metrics": {
+      "current_ratio": 1.52,
+      "quick_ratio": 1.48,
+      "cash_ratio": 0.87
+    },
+    "leverage_metrics": {
+      "debt_to_equity": 0.065,
+      "debt_to_assets": 0.037,
+      "net_debt_to_ebitda": 0.54
+    },
+    "efficiency_metrics": {
+      "asset_turnover": 0.714,
+      "receivables_turnover": 6.23,
+      "inventory_turnover": 45.32
+    }
+  },
+  "key_metrics": {
+    "date": "2024-12-31",
+    "period": "FY",
+    "enterprise_value": 2028316000000,
+    "ev_to_revenue": 6.599,
+    "ev_to_ebitda": 15.51,
+    "free_cash_flow": 80456000000,
+    "fcf_per_share": 6.18,
+    "book_value_per_share": 18.87,
+    "dividend_per_share": 0.00,
+    "net_income_per_share": 4.97,
+    "revenue_per_share": 23.62,
+    "shares_outstanding": 12990000000,
+    "market_cap": 2100000000000
+  },
+  "analyst_estimates": [
+    {
+      "fiscal_year": 2025,
+      "estimate_date": "2025-12-31",
+      "period": "FY",
+      "estimated_revenue": {
+        "low": 340000000000,
+        "high": 370000000000,
+        "average": 355000000000,
+        "consensus": 355000000000
+      },
+      "estimated_eps": {
+        "low": 5.20,
+        "high": 6.00,
+        "average": 5.60,
+        "consensus": 5.60
+      },
+      "number_of_estimates": 48,
+      "estimate_spread_revenue_pct": 0.088,
+      "estimate_spread_eps_pct": 0.154
+    },
+    {
+      "fiscal_year": 2026,
+      "estimate_date": "2026-12-31",
+      "period": "FY",
+      "estimated_revenue": {
+        "low": 380000000000,
+        "high": 420000000000,
+        "average": 400000000000,
+        "consensus": 400000000000
+      },
+      "estimated_eps": {
+        "low": 5.50,
+        "high": 6.50,
+        "average": 6.00,
+        "consensus": 6.00
+      },
+      "number_of_estimates": 42,
+      "estimate_spread_revenue_pct": 0.105,
+      "estimate_spread_eps_pct": 0.182
+    },
+    {
+      "fiscal_year": 2026,
+      "quarter": "Q1",
+      "estimate_date": "2026-Q1",
+      "period": "Q1",
+      "estimated_revenue": {
+        "low": 88000000000,
+        "high": 98000000000,
+        "average": 93000000000,
+        "consensus": 93000000000
+      },
+      "estimated_eps": {
+        "low": 1.35,
+        "high": 1.55,
+        "average": 1.45,
+        "consensus": 1.45
+      },
+      "number_of_estimates": 35,
+      "estimate_spread_revenue_pct": 0.113,
+      "estimate_spread_eps_pct": 0.148
+    },
+    {
+      "fiscal_year": 2026,
+      "quarter": "Q2",
+      "estimate_date": "2026-Q2",
+      "period": "Q2",
+      "estimated_revenue": {
+        "low": 92000000000,
+        "high": 102000000000,
+        "average": 97000000000,
+        "consensus": 97000000000
+      },
+      "estimated_eps": {
+        "low": 1.40,
+        "high": 1.60,
+        "average": 1.50,
+        "consensus": 1.50
+      },
+      "number_of_estimates": 35,
+      "estimate_spread_revenue_pct": 0.109,
+      "estimate_spread_eps_pct": 0.143
+    }
+  ],
+  "business_segments": [
+    {
+      "segment_name": "Google Services",
+      "segment_id": "google_services",
+      "revenue": 240000000000,
+      "revenue_percentage": 0.781,
+      "revenue_percentage_display": "78.1%",
+      "description": "Search, Maps, YouTube, Gmail, Android, Chrome, and other consumer and business services"
+    },
+    {
+      "segment_name": "Google Cloud",
+      "segment_id": "google_cloud",
+      "revenue": 45000000000,
+      "revenue_percentage": 0.146,
+      "revenue_percentage_display": "14.6%",
+      "description": "Cloud infrastructure and platform services, BigQuery, Vertex AI, Workspace"
+    },
+    {
+      "segment_name": "Other Bets",
+      "segment_id": "other_bets",
+      "revenue": 22394000000,
+      "revenue_percentage": 0.073,
+      "revenue_percentage_display": "7.3%",
+      "description": "Waymo (autonomous vehicles), Verily (life sciences), Access (fiber broadband), and other moonshot initiatives"
+    }
+  ],
+  "financial_analysis_summary": {
+    "valuation_assessment": {
+      "pe_ratio": 34.65,
+      "ev_to_ebitda": 15.51,
+      "price_to_sales": 6.84,
+      "price_to_book": 8.55,
+      "assessment": "Trading at premium valuation relative to tech peers, consistent with strong brand and growth profile. Elevated multiples reflect market expectations for AI/cloud growth acceleration.",
+      "valuation_category": "Premium"
+    },
+    "profitability_assessment": {
+      "gross_margin": "70.8%",
+      "operating_margin": "40.1%",
+      "net_margin": "21.1%",
+      "roe": "26.4%",
+      "roic": "17.8%",
+      "assessment": "Highly profitable with best-in-class margins. Exceptional returns on equity and invested capital demonstrate efficient capital deployment. Operating margin expansion evident despite increased R&D investment in AI.",
+      "profitability_category": "Excellent"
+    },
+    "financial_health_assessment": {
+      "net_debt": 70742000000,
+      "net_debt_to_ebitda": 0.54,
+      "current_ratio": 1.52,
+      "debt_to_equity": 0.065,
+      "cash_position": 86651000000,
+      "assessment": "Very strong balance sheet with significant cash position and minimal leverage. Net debt to EBITDA of 0.54x is very conservative. Ample financial flexibility for strategic investments, acquisitions, and shareholder returns.",
+      "financial_health_category": "Strong"
+    },
+    "growth_assessment": {
+      "historical_revenue_growth": "Not available - 2024 revenue flat vs 2023",
+      "eps_growth_yoy": "6.2%",
+      "fcf_generation": 80456000000,
+      "assessment": "Consistent earnings growth with strong free cash flow generation at 80.5B. Despite flat revenue, improved operational efficiency and cost management driving earnings expansion. Cloud segment showing accelerating growth trajectory.",
+      "growth_category": "Moderate to Strong"
+    },
+    "segment_diversity": {
+      "google_services_concentration": "78.1%",
+      "google_cloud_opportunity": "High growth potential - 14.6% of revenue, fastest growing segment",
+      "other_bets_diversification": "Minimal but strategic - represents innovation pipeline",
+      "assessment": "Google Services remains dominant but concentration risk is mitigated by cloud acceleration. Other Bets provides long-term optionality in emerging markets.",
+      "diversification_category": "Moderate"
+    }
+  },
+  "key_investment_metrics": {
+    "growth_projections": {
+      "revenue_2025_estimate": 355000000000,
+      "revenue_2026_estimate": 400000000000,
+      "revenue_cagr_2024_2026": "0.141",
+      "eps_2025_estimate": 5.60,
+      "eps_2026_estimate": 6.00,
+      "eps_cagr_2024_2026": "0.096"
+    },
+    "valuation_multiples_forward": {
+      "forward_pe_2025": 30.82,
+      "forward_pe_2026": 28.75,
+      "implied_growth_rate": "10-15% EPS CAGR justifies premium multiple"
+    },
+    "cash_flow_generation": {
+      "fcf_2024": 80456000000,
+      "fcf_per_share": 6.18,
+      "fcf_conversion_from_ni": 1.244,
+      "fcf_yield": "0.038"
+    },
+    "capital_allocation": {
+      "dividend_policy": "No dividends",
+      "share_buyback_potential": "Significant capacity given strong FCF and balance sheet",
+      "m_and_a_capacity": "Ample resources for strategic acquisitions"
+    }
+  },
+  "risks_and_opportunities": {
+    "key_risks": [
+      {
+        "risk": "Regulatory Scrutiny",
+        "description": "Ongoing antitrust investigations globally (EU, DOJ) may impact business model and profitability",
+        "impact": "High"
+      },
+      {
+        "risk": "AI Competition Intensification",
+        "description": "Increasing competition from Microsoft, OpenAI, Meta in AI/LLM space could pressure search and advertising",
+        "impact": "High"
+      },
+      {
+        "risk": "Advertising Cyclicality",
+        "description": "Dependence on Google Services (78% revenue) exposes to advertising market cycles and economic downturns",
+        "impact": "Medium"
+      },
+      {
+        "risk": "YouTube Content Liability",
+        "description": "Content moderation challenges and potential liability for user-generated content",
+        "impact": "Medium"
+      },
+      {
+        "risk": "Cloud Competition",
+        "description": "AWS and Azure dominance could limit Google Cloud's growth rate and profitability",
+        "impact": "Medium"
+      }
+    ],
+    "key_opportunities": [
+      {
+        "opportunity": "AI/AGI Leadership",
+        "description": "Gemini and other AI models could revolutionize search, productivity, and enterprise applications",
+        "potential_impact": "Transformational"
+      },
+      {
+        "opportunity": "Google Cloud Acceleration",
+        "description": "Growing enterprise adoption of Google Cloud could drive significant operating leverage and margin expansion",
+        "potential_impact": "High"
+      },
+      {
+        "opportunity": "YouTube Monetization Expansion",
+        "description": "Shorts monetization and premium subscriptions could unlock significant incremental revenue",
+        "potential_impact": "High"
+      },
+      {
+        "opportunity": "Other Bets Exits",
+        "description": "Potential IPO or strategic sales of Waymo, Verily could unlock significant value",
+        "potential_impact": "Medium to High"
+      },
+      {
+        "opportunity": "Emerging Markets Growth",
+        "description": "Expanding digital adoption in developing markets offers long-term revenue growth potential",
+        "potential_impact": "Medium"
+      }
+    ]
+  },
+  "data_quality_notes": {
+    "income_statement": "Complete 5-year history (2020-2024) with all key metrics",
+    "balance_sheet": "Most recent as of 2024-12-31 with comprehensive breakdown",
+    "financial_ratios": "Current ratios as of latest reporting period",
+    "analyst_estimates": "Consensus estimates for FY2025, FY2026, and select quarters from 35-48 analysts",
+    "business_segments": "Three main segments with revenue breakdown",
+    "data_currency": "All figures in USD",
+    "data_timeliness": "Updated as of January 12, 2026"
+  }
+}

@@ -3,10 +3,11 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, ChevronRight, Bot, Cpu, Brain, Sparkles, AlertTriangle } from 'lucide-react';
-import { cn, formatDuration, formatCost } from '@/lib/utils';
+import { cn, formatCost } from '@/lib/utils';
 
 interface AgentEvent {
   timestamp: string;
+  type?: string;
   event_type: string;
   agent_name: string;
   stage: number;
@@ -42,6 +43,8 @@ const stageColors: Record<number, string> = {
   1: 'border-l-blue-500',
   2: 'border-l-purple-500',
   3: 'border-l-amber-500',
+  3.5: 'border-l-orange-500',
+  3.75: 'border-l-yellow-500',
   4: 'border-l-green-500',
   5: 'border-l-cyan-500',
   6: 'border-l-pink-500',
@@ -83,7 +86,8 @@ export function AgentActivity({ events, className }: AgentActivityProps) {
           {recentEvents.map((event, idx) => {
             const Icon = agentIcons[event.agent_name] || Bot;
             const isExpanded = expandedIds.has(idx);
-            const isError = event.event_type.includes('error');
+            const eventType = event.type || event.event_type || '';
+            const isError = eventType.includes('error');
             const hasDetail = event.data.detail || event.data.error || event.data.traceback;
 
             return (

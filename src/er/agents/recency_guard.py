@@ -13,9 +13,11 @@ from typing import Any
 
 from er.agents.base import Agent, AgentContext
 from er.llm.router import AgentRole
+from er.retrieval.service import WebResearchService
 from er.types import (
     CompanyContext,
     CoverageScorecard,
+    DiscoveredThread,
     RecencyFinding,
     RecencyGuardOutput,
     RunState,
@@ -25,6 +27,8 @@ from er.types import (
 
 # Maximum recency queries to generate
 MAX_RECENCY_QUERIES = 10
+MAX_THREAD_RECENCY_QUERIES = 8
+MAX_THREAD_RECENCY_CARDS = 3
 
 
 class RecencyGuardAgent(Agent):
@@ -44,6 +48,7 @@ class RecencyGuardAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
+        self._web_research_service: WebResearchService | None = None
 
     @property
     def name(self) -> str:
@@ -59,6 +64,7 @@ class RecencyGuardAgent(Agent):
         company_context: CompanyContext,
         coverage_scorecard: CoverageScorecard | None = None,
         thread_briefs: list[ThreadBrief] | None = None,
+        threads: list[DiscoveredThread] | None = None,
         recency_days: int = 90,
         **kwargs: Any,
     ) -> RecencyGuardOutput:
@@ -98,19 +104,54 @@ class RecencyGuardAgent(Agent):
             recency_days=recency_days,
         )
 
-        # In a real implementation, would execute queries and get findings
-        # For now, create placeholder findings
-        findings = [
-            RecencyFinding(
-                hypothesis=h,
-                query=q,
-                finding="Pending verification",
-                status="inconclusive",
-                evidence_ids=[],
-                confidence=0.5,
-            )
-            for h, q in zip(hypotheses[:MAX_RECENCY_QUERIES], forced_queries)
-        ]
+        # Execute forced queries via evidence-first retrieval
+        findings: list[RecencyFinding] = []
+        evidence_ids: list[str] = []
+        if forced_queries:
+            try:
+                web_service = await self._get_web_research_service()
+                results = await web_service.research_batch(
+                    queries=forced_queries[:MAX_RECENCY_QUERIES],
+                    max_results_per_query=2,
+                    recency_days=recency_days,
+                    max_total_queries=MAX_RECENCY_QUERIES,
+                )
+
+                for hypothesis, query, result in zip(hypotheses[:MAX_RECENCY_QUERIES], forced_queries, results):
+                    if result.evidence_cards:
+                        top_card = result.evidence_cards[0]
+                        finding_text = top_card.summary or "Recent evidence found"
+                        status = "confirmed"
+                        confidence = min(0.8, 0.5 + 0.05 * len(result.evidence_cards))
+                    else:
+                        finding_text = "No recent evidence found"
+                        status = "inconclusive"
+                        confidence = 0.4
+
+                    findings.append(RecencyFinding(
+                        hypothesis=hypothesis,
+                        query=query,
+                        finding=finding_text,
+                        status=status,
+                        evidence_ids=result.evidence_ids,
+                        confidence=confidence,
+                    ))
+                    evidence_ids.extend(result.evidence_ids)
+            except Exception as e:
+                self.log_warning("Recency queries failed", error=str(e))
+
+        if not findings:
+            findings = [
+                RecencyFinding(
+                    hypothesis=h,
+                    query=q,
+                    finding="Pending verification",
+                    status="inconclusive",
+                    evidence_ids=[],
+                    confidence=0.5,
+                )
+                for h, q in zip(hypotheses[:MAX_RECENCY_QUERIES], forced_queries)
+            ]
 
         output = RecencyGuardOutput(
             ticker=run_state.ticker,
@@ -118,8 +159,17 @@ class RecencyGuardAgent(Agent):
             outdated_priors_checked=hypotheses,
             findings=findings,
             forced_queries=forced_queries,
-            evidence_ids=[],
+            evidence_ids=list(set(evidence_ids)),
         )
+
+        # Augment thread briefs with recent developments for deep research
+        if thread_briefs and threads:
+            await self._augment_thread_briefs_with_recency(
+                company_context=company_context,
+                thread_briefs=thread_briefs,
+                threads=threads,
+                recency_days=recency_days,
+            )
 
         # Store artifact
         if self.workspace_store:
@@ -138,6 +188,16 @@ class RecencyGuardAgent(Agent):
         )
 
         return output
+
+    async def _get_web_research_service(self) -> WebResearchService:
+        """Get or create WebResearchService."""
+        if self._web_research_service is None:
+            self._web_research_service = WebResearchService(
+                llm_router=self.llm_router,
+                evidence_store=self.evidence_store,
+                workspace_store=self.workspace_store,
+            )
+        return self._web_research_service
 
     async def _generate_outdated_prior_hypotheses(
         self,
@@ -276,6 +336,141 @@ Output ONLY valid JSON."""
             queries.append(query.strip())
 
         return queries
+
+    async def _augment_thread_briefs_with_recency(
+        self,
+        company_context: CompanyContext,
+        thread_briefs: list[ThreadBrief],
+        threads: list[DiscoveredThread],
+        recency_days: int,
+    ) -> None:
+        """Attach recent developments to thread briefs for downstream analysis."""
+        if not thread_briefs or not threads:
+            return
+
+        brief_map = {tb.thread_id: tb for tb in thread_briefs}
+        threads_by_priority = sorted(threads, key=lambda t: t.priority)
+        target_threads = threads_by_priority[:MAX_THREAD_RECENCY_QUERIES]
+
+        queries: list[str] = []
+        thread_ids: list[str] = []
+        for thread in target_threads:
+            queries.append(self._build_thread_recency_query(company_context.company_name, thread))
+            thread_ids.append(thread.thread_id)
+
+        if not queries:
+            return
+
+        web_service = await self._get_web_research_service()
+        results = await web_service.research_batch(
+            queries=queries,
+            max_results_per_query=2,
+            recency_days=recency_days,
+            max_total_queries=len(queries),
+        )
+
+        now = datetime.utcnow()
+        for thread_id, thread, result in zip(thread_ids, target_threads, results):
+            brief = brief_map.get(thread_id)
+            if not brief or not result.evidence_cards:
+                continue
+
+            developments, evidence_ids = self._summarize_recency_cards(
+                result.evidence_cards[:MAX_THREAD_RECENCY_CARDS],
+                now,
+            )
+            if not developments:
+                continue
+
+            brief.recent_developments = developments
+            brief.recency_evidence_ids = evidence_ids
+            for eid in evidence_ids:
+                if eid not in brief.key_evidence_ids:
+                    brief.key_evidence_ids.append(eid)
+
+            if not brief.recency_questions:
+                brief.recency_questions = self._build_recency_questions(thread, developments)
+
+    def _build_thread_recency_query(
+        self,
+        company_name: str,
+        thread: DiscoveredThread,
+    ) -> str:
+        """Build a focused recency query for a thread."""
+        year = datetime.now().year
+        base = thread.name
+        if thread.research_questions:
+            base = thread.research_questions[0].rstrip("?")
+        query = f"{company_name} {thread.name} {base} {year} updates"
+        return query[:200]
+
+    def _summarize_recency_cards(
+        self,
+        cards: list[Any],
+        now: datetime,
+    ) -> tuple[list[str], list[str]]:
+        """Create recency bullets with 30/60/90-day buckets."""
+        developments: list[str] = []
+        evidence_ids: list[str] = []
+
+        for card in cards:
+            bucket = self._bucket_by_recency(card.published_date, now)
+            title = (card.title or "").strip()
+            source = (card.source or "").strip()
+            detail = (card.summary or "").strip()
+            if len(detail) > 160:
+                detail = f"{detail[:157]}..."
+            evidence_id = getattr(card, "raw_evidence_id", "")
+
+            if evidence_id and evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+
+            parts = [f"{bucket}: {title}"]
+            if source:
+                parts.append(f"({source})")
+            if detail:
+                parts.append(f"- {detail}")
+            if evidence_id:
+                parts.append(f"[{evidence_id}]")
+            developments.append(" ".join(parts).strip())
+
+        return developments, evidence_ids
+
+    def _bucket_by_recency(self, published_date: str | None, now: datetime) -> str:
+        """Bucket a published date into 30/60/90-day windows."""
+        if published_date:
+            try:
+                published = datetime.fromisoformat(published_date)
+                age_days = max(0, (now - published).days)
+                if age_days <= 30:
+                    return "30d"
+                if age_days <= 60:
+                    return "60d"
+                if age_days <= 90:
+                    return "90d"
+            except ValueError:
+                pass
+        return "90d"
+
+    def _build_recency_questions(
+        self,
+        thread: DiscoveredThread,
+        developments: list[str],
+    ) -> list[str]:
+        """Build recency-focused questions to expand scope."""
+        topic = developments[0] if developments else thread.name
+        if ": " in topic:
+            topic = topic.split(": ", 1)[1]
+        if "[" in topic:
+            topic = topic.split("[", 1)[0].strip()
+        if len(topic) > 80:
+            topic = f"{topic[:77]}..."
+
+        return [
+            f"What changed in the last 30-90 days for {thread.name}, and does it alter growth, margins, or adoption?",
+            f"Which recent competitor, regulatory, or platform shifts materially affect {thread.name}?",
+            f"Does the development '{topic}' change TAM, pricing, or unit economics for {thread.name}?",
+        ]
 
     async def close(self) -> None:
         """Close any open resources."""

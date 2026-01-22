@@ -71,6 +71,25 @@ Write a comprehensive equity research report (~15,000-20,000 words). This is the
 - Conviction: High / Medium / Low
 - 1-paragraph thesis (what's the core investment case?)
 
+## FACT LEDGER (CITED)
+List 25-50 key factual claims with evidence IDs. Format exactly:
+- F1: fact statement [ev_xxx]
+- F2: fact statement [ev_xxx]
+
+Rules:
+- Facts only (no opinions or predictions)
+- Every line must include at least one evidence ID in brackets
+- Use evidence IDs provided in the inputs; do not invent new ones
+
+## INFERENCE MAP (FACT-BASED)
+List 10-20 key inferences derived from the Fact Ledger. Format exactly:
+- I1: inference statement (based on F1, F2, F7)
+- I2: inference statement (based on F3, F9)
+
+Rules:
+- Inferences should NOT include evidence IDs
+- Each inference must reference one or more Fact IDs
+
 ## COMPANY OVERVIEW
 Synthesize what this company does across all verticals. How do the pieces fit together? What's the corporate strategy?
 
@@ -188,6 +207,9 @@ THEN, at the very end, include a JSON block with structured metadata:
 7. **BE SPECIFIC** - Not "growth could slow" but "if Cloud growth drops below 20% YoY".
 8. **USE VERIFIED FACTS** - Prioritize facts marked as VERIFIED. Note facts marked CONTRADICTED.
 9. **ACKNOWLEDGE UNCERTAINTY** - If a claim is UNVERIFIABLE, say so in the report.
+10. **FACT LEDGER REQUIRED** - Every factual claim must appear in the Fact Ledger with evidence IDs.
+11. **INFERENCES MUST TRACE TO FACTS** - Use Fact IDs (F1, F2, ...) when stating inferences.
+12. **CONCLUSIONS DON’T NEED CITATIONS** - Investment view should cite inference IDs, not evidence IDs.
 """
 
 
@@ -232,9 +254,11 @@ Revise your report incorporating the editor's feedback. You should:
 
 3. **MAINTAIN your voice and structure** - This is still YOUR report. Don't rewrite it from scratch.
 
-4. **UPDATE the JSON metadata** at the end if the feedback affects investment view, conviction, or confidence.
+4. **PRESERVE the Fact Ledger and Inference Map** - Update them if any factual claims change.
 
-5. **KEEP THE FULL LENGTH** - Don't compress. The revised report should be similar length to the original (~15-20K words).
+5. **UPDATE the JSON metadata** at the end if the feedback affects investment view, conviction, or confidence.
+
+6. **KEEP THE FULL LENGTH** - Don't compress. The revised report should be similar length to the original (~15-20K words).
 
 ## OUTPUT
 
@@ -352,14 +376,22 @@ class SynthesizerAgent(Agent):
             cross_vertical_section=cross_vertical_section,
         )
 
+        # Aggregate evidence IDs from company context and all vertical analyses
+        all_evidence_ids: list[str] = list(company_context.evidence_ids)
+        for va in vertical_analyses:
+            for eid in va.evidence_ids:
+                if eid not in all_evidence_ids:
+                    all_evidence_ids.append(eid)
+        aggregated_evidence_ids = tuple(all_evidence_ids)
+
         # Run both syntheses in parallel, save each as it completes
         self.log_info("Running Claude and GPT syntheses in parallel", ticker=run_state.ticker)
 
         import json
         from pathlib import Path
 
-        claude_task = asyncio.create_task(self._run_claude_synthesis(prompt, company_context))
-        gpt_task = asyncio.create_task(self._run_gpt_synthesis(prompt, company_context))
+        claude_task = asyncio.create_task(self._run_claude_synthesis(prompt, aggregated_evidence_ids))
+        gpt_task = asyncio.create_task(self._run_gpt_synthesis(prompt, aggregated_evidence_ids))
 
         claude_synthesis = None
         gpt_synthesis = None
@@ -477,6 +509,12 @@ class SynthesizerAgent(Agent):
 
         lines = []
 
+        def _format_evidence_refs(fact: Fact) -> str:
+            evidence_ids = fact.evidence_ids or ([fact.evidence_id] if fact.evidence_id else [])
+            if not evidence_ids:
+                return "[no_evidence]"
+            return f"[{', '.join(evidence_ids[:3])}]"
+
         # Group by status
         verified = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.VERIFIED]
         partial = [vf for vf in package.all_verified_facts if vf.status == VerificationStatus.PARTIAL]
@@ -487,19 +525,22 @@ class SynthesizerAgent(Agent):
         if verified:
             lines.append("### VERIFIED FACTS (cite these with confidence)")
             for vf in verified[:15]:  # Limit to top 15
-                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement} (conf: {vf.adjusted_confidence:.0%})")
+                evidence_ref = _format_evidence_refs(vf.original_fact)
+                lines.append(f"- {evidence_ref} {vf.original_fact.statement} (conf: {vf.adjusted_confidence:.0%})")
 
         # Partial facts
         if partial:
             lines.append("\n### PARTIALLY VERIFIED (use with caution)")
             for vf in partial[:10]:
-                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+                evidence_ref = _format_evidence_refs(vf.original_fact)
+                lines.append(f"- {evidence_ref} {vf.original_fact.statement}")
 
         # Contradicted facts (warn about these)
         if contradicted:
             lines.append("\n### CONTRADICTED (DO NOT USE - conflicts with ground truth)")
             for vf in contradicted:
-                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+                evidence_ref = _format_evidence_refs(vf.original_fact)
+                lines.append(f"- {evidence_ref} {vf.original_fact.statement}")
                 lines.append(f"  ** Contradiction: {vf.verification_notes}")
 
         # Critical issues
@@ -508,7 +549,36 @@ class SynthesizerAgent(Agent):
             for issue in package.critical_issues[:5]:
                 lines.append(f"- {issue}")
 
+        # Add summaries from workspace artifacts when available
+        extra_sections = []
+        summary = self._get_latest_artifact_summary("claim_graph")
+        if summary:
+            extra_sections.append(f"- Claim graph: {summary}")
+        summary = self._get_latest_artifact_summary("entailment_report")
+        if summary:
+            extra_sections.append(f"- Entailment: {summary}")
+        summary = self._get_latest_artifact_summary("coverage_scorecard")
+        if summary:
+            extra_sections.append(f"- Coverage audit: {summary}")
+        summary = self._get_latest_artifact_summary("recency_guard")
+        if summary:
+            extra_sections.append(f"- Recency guard: {summary}")
+
+        if extra_sections:
+            lines.append("\n### ADDITIONAL VALIDATION SIGNALS")
+            lines.extend(extra_sections)
+
         return "\n".join(lines)
+
+    def _get_latest_artifact_summary(self, artifact_type: str) -> str | None:
+        """Get the latest workspace artifact summary for a type."""
+        if not self.workspace_store:
+            return None
+        artifacts = self.workspace_store.list_artifacts(artifact_type)
+        if not artifacts:
+            return None
+        summary = artifacts[0].get("summary")
+        return summary or None
 
     def _format_cross_vertical_map(
         self,
@@ -560,7 +630,7 @@ class SynthesizerAgent(Agent):
     async def _run_claude_synthesis(
         self,
         prompt: str,
-        company_context: CompanyContext,
+        aggregated_evidence_ids: tuple[str, ...],
     ) -> SynthesisOutput:
         """Run Claude synthesis with extended thinking."""
         self.log_info("Starting Claude synthesis")
@@ -601,13 +671,13 @@ class SynthesizerAgent(Agent):
         return self._parse_response(
             response.content,
             "claude",
-            company_context.evidence_ids,
+            aggregated_evidence_ids,
         )
 
     async def _run_gpt_synthesis(
         self,
         prompt: str,
-        company_context: CompanyContext,
+        aggregated_evidence_ids: tuple[str, ...],
     ) -> SynthesisOutput:
         """Run GPT synthesis with high reasoning effort."""
         self.log_info("Starting GPT synthesis")
@@ -647,7 +717,7 @@ class SynthesizerAgent(Agent):
         return self._parse_response(
             response.content,
             "gpt",
-            company_context.evidence_ids,
+            aggregated_evidence_ids,
         )
 
     def _parse_response(
@@ -738,10 +808,12 @@ class SynthesizerAgent(Agent):
         )
 
         # Use the same model that produced the original synthesis
+        # Pass evidence IDs from original synthesis (which should already be aggregated)
+        evidence_ids = tuple(original_synthesis.evidence_ids)
         if original_synthesis.synthesizer_model == "claude":
-            revised = await self._run_claude_revision(prompt, company_context)
+            revised = await self._run_claude_revision(prompt, evidence_ids)
         else:
-            revised = await self._run_gpt_revision(prompt, company_context)
+            revised = await self._run_gpt_revision(prompt, evidence_ids)
 
         self.log_info(
             "Completed synthesis revision",
@@ -890,7 +962,7 @@ You must address the following critical issues:
     async def _run_claude_revision(
         self,
         prompt: str,
-        company_context: CompanyContext,
+        evidence_ids: tuple[str, ...],
     ) -> SynthesisOutput:
         """Run Claude revision of the synthesis report."""
         self.log_info("Starting Claude revision")
@@ -927,12 +999,12 @@ You must address the following critical issues:
             thinking_tokens=response.metadata.get("thinking_tokens") if response.metadata else 0,
         )
 
-        return self._parse_response(response.content, "claude", company_context.evidence_ids)
+        return self._parse_response(response.content, "claude", evidence_ids)
 
     async def _run_gpt_revision(
         self,
         prompt: str,
-        company_context: CompanyContext,
+        evidence_ids: tuple[str, ...],
     ) -> SynthesisOutput:
         """Run GPT revision of the synthesis report."""
         self.log_info("Starting GPT revision")
@@ -968,7 +1040,7 @@ You must address the following critical issues:
             reasoning_tokens=response.metadata.get("reasoning_tokens") if response.metadata else 0,
         )
 
-        return self._parse_response(response.content, "gpt", company_context.evidence_ids)
+        return self._parse_response(response.content, "gpt", evidence_ids)
 
     async def close(self) -> None:
         """Close any open clients."""

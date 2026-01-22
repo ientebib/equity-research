@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
+from er.retrieval.service import WebResearchService
 from er.retrieval.query_planner import QueryPlanner, QueryPlan
 from er.retrieval.source_catalog import SourceCatalog
 from er.types import (
@@ -59,6 +60,7 @@ class CoverageAuditor(Agent):
         super().__init__(context)
         self.source_catalog = SourceCatalog()
         self.query_planner = QueryPlanner(source_catalog=self.source_catalog)
+        self._web_research_service: WebResearchService | None = None
 
     @property
     def name(self) -> str:
@@ -129,15 +131,10 @@ class CoverageAuditor(Agent):
 
             # Recompute scorecard with new evidence
             if actions:
-                # Collect new evidence IDs
-                new_evidence_ids = []
-                for action in actions:
-                    new_evidence_ids.extend(action.evidence_ids)
-
-                # Recompute (in a real impl, would fetch new cards)
+                refreshed_cards = self._get_evidence_cards_from_workspace()
                 scorecard = self._compute_scorecard(
                     ticker=run_state.ticker,
-                    evidence_cards=evidence_cards,  # Would include new cards
+                    evidence_cards=refreshed_cards or evidence_cards,
                     categories=categories,
                     recency_days=recency_days,
                 )
@@ -343,20 +340,55 @@ class CoverageAuditor(Agent):
                 category=result.category,
             )
 
-            # In a real implementation, would call WebResearchService here
-            # For now, record the action
+            # Execute targeted query via evidence-first retrieval
+            urls_fetched: list[str] = []
+            evidence_ids: list[str] = []
+            success = False
+            notes = "Second-pass query executed"
+            try:
+                web_service = await self._get_web_research_service()
+                research_result = await web_service.research(
+                    query=query,
+                    max_results=3,
+                    recency_days=scorecard.recency_days,
+                )
+                urls_fetched = [r.url for r in research_result.search_results]
+                evidence_ids = research_result.evidence_ids
+                success = bool(evidence_ids)
+                if not success:
+                    notes = "No evidence found"
+            except Exception as e:
+                notes = f"Second-pass query failed: {e}"
+
             action = CoverageAction(
                 category=result.category,
                 query=query,
-                urls_fetched=[],  # Would be populated by actual fetch
-                evidence_ids=[],  # Would be populated by actual fetch
-                success=True,
-                notes="Second-pass query generated",
+                urls_fetched=urls_fetched,
+                evidence_ids=evidence_ids,
+                success=success,
+                notes=notes,
             )
             actions.append(action)
             queries_remaining -= 1
 
         return actions
+
+    async def _get_web_research_service(self) -> WebResearchService:
+        """Get or create WebResearchService."""
+        if self._web_research_service is None:
+            self._web_research_service = WebResearchService(
+                llm_router=self.llm_router,
+                evidence_store=self.evidence_store,
+                workspace_store=self.workspace_store,
+            )
+        return self._web_research_service
+
+    def _get_evidence_cards_from_workspace(self) -> list[dict[str, Any]]:
+        """Pull evidence cards from WorkspaceStore if available."""
+        if not self.workspace_store:
+            return []
+        artifacts = self.workspace_store.list_artifacts("evidence_card")
+        return [a.get("content", {}) for a in artifacts]
 
     def _generate_gap_query(
         self,

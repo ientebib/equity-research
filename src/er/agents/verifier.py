@@ -585,20 +585,20 @@ class VerificationAgent(Agent):
 
         for eid in evidence_ids[:50]:  # Limit to avoid too many lookups
             try:
-                # Try to get evidence card first (has summary)
-                card = self.evidence_store.get_evidence(eid)
-                if card:
-                    # Use excerpt or snippet as the text representation
-                    text = card.get("excerpt") or card.get("snippet") or card.get("summary", "")
+                # Try to get evidence record first (has snippet)
+                evidence = await self.evidence_store.get(eid)
+                if evidence:
+                    # Use snippet from the Evidence object
+                    text = evidence.snippet or ""
                     if text:
                         evidence_map[eid] = text[:1000]  # Truncate to reasonable length
                         continue
 
-                # Fall back to blob if card not available
-                blob = self.evidence_store.get_blob(eid)
+                # Fall back to blob if evidence record not available or has no snippet
+                blob = await self.evidence_store.get_blob(eid)
                 if blob:
-                    # Blob is raw HTML or text - extract a snippet
-                    text = blob[:1000] if isinstance(blob, str) else blob.decode("utf-8", errors="ignore")[:1000]
+                    # Blob is raw bytes - decode and extract a snippet
+                    text = blob.decode("utf-8", errors="ignore")[:1000]
                     evidence_map[eid] = text
 
             except Exception as e:

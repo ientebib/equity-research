@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Download, Share2, TrendingUp, TrendingDown, Minus, ChevronRight, Loader2 } from 'lucide-react';
+import { Download, Share2, TrendingUp, TrendingDown, Minus, Loader2 } from 'lucide-react';
 import { cn, formatPercentage } from '@/lib/utils';
 import api from '@/lib/api';
 

@@ -59,7 +59,7 @@ class DiscoveryMerger(Agent):
     def merge(
         self,
         internal: DiscoveryOutput,
-        external: ExternalDiscoveryOutput,
+        external: ExternalDiscoveryOutput | list[ExternalDiscoveryOutput],
         run_state: RunState,
     ) -> DiscoveryOutput:
         """Merge internal and external discovery outputs.
@@ -69,25 +69,28 @@ class DiscoveryMerger(Agent):
 
         Args:
             internal: Output from Internal Discovery (company data focus).
-            external: Output from External Discovery (market context focus).
+            external: Output(s) from External Discovery (market context focus).
             run_state: Current run state.
 
         Returns:
             Merged DiscoveryOutput with all threads and groups.
         """
+        external_outputs = self._normalize_external_outputs(external)
+        combined_external = self._combine_external_outputs(external_outputs)
+
         self.log_info(
             "Merging discovery outputs",
             ticker=run_state.ticker,
             internal_threads=len(internal.research_threads),
-            external_variant_perceptions=len(external.variant_perceptions),
-            external_suggested_threads=len(external.suggested_threads),
+            external_variant_perceptions=len(combined_external.variant_perceptions),
+            external_suggested_threads=len(combined_external.suggested_threads),
         )
 
         # Start with internal threads
         merged_threads: list[DiscoveredThread] = list(internal.research_threads)
 
         # Convert external strategic shifts to threads (HIGHEST PRIORITY - business model changes)
-        for i, shift in enumerate(external.strategic_shifts):
+        for i, shift in enumerate(combined_external.strategic_shifts):
             description = shift.get("description", f"Strategic shift {i+1}")
             shift_type = shift.get("shift_type", "unknown")
 
@@ -112,12 +115,12 @@ class DiscoveryMerger(Agent):
                         f"How does this change the competitive position?",
                         f"What is the addressable market for this new business?",
                     ],
-                    evidence_ids=list(external.evidence_ids),
+                    evidence_ids=list(combined_external.evidence_ids),
                 )
                 merged_threads.append(thread)
 
         # Convert external variant perceptions to threads
-        for i, vp in enumerate(external.variant_perceptions):
+        for i, vp in enumerate(combined_external.variant_perceptions):
             topic = vp.get("topic", f"Variant {i+1}")
 
             # Check if this variant perception is already covered by an internal thread
@@ -140,12 +143,12 @@ class DiscoveryMerger(Agent):
                         f"What evidence supports the variant view: {vp.get('variant_view', '')}?",
                         f"What would trigger a re-rating: {vp.get('trigger_event', '')}?",
                     ],
-                    evidence_ids=list(external.evidence_ids),
+                    evidence_ids=list(combined_external.evidence_ids),
                 )
                 merged_threads.append(thread)
 
         # Convert external suggested threads
-        for st in external.suggested_threads:
+        for st in combined_external.suggested_threads:
             name = st.get("name", "Unknown")
 
             # Check if already covered
@@ -164,18 +167,18 @@ class DiscoveryMerger(Agent):
                     is_official_segment=False,
                     value_driver_hypothesis=st.get("why_it_matters", ""),
                     research_questions=st.get("research_questions", []),
-                    evidence_ids=list(external.evidence_ids),
+                    evidence_ids=list(combined_external.evidence_ids),
                 )
                 merged_threads.append(thread)
 
         # Merge cross-cutting themes
         merged_themes = list(internal.cross_cutting_themes)
-        for context_item in external.critical_external_context:
+        for context_item in combined_external.critical_external_context:
             if context_item not in merged_themes:
                 merged_themes.append(f"[External] {context_item}")
 
         # Add competitor insights as themes
-        for cd in external.competitor_developments[:3]:  # Top 3 competitors
+        for cd in combined_external.competitor_developments[:3]:  # Top 3 competitors
             competitor = cd.get("competitor", "Unknown")
             announcement = cd.get("announcement", "")
             if announcement:
@@ -185,7 +188,7 @@ class DiscoveryMerger(Agent):
 
         # Merge optionality candidates
         merged_optionality = list(internal.optionality_candidates)
-        for vp in external.variant_perceptions:
+        for vp in combined_external.variant_perceptions:
             topic = vp.get("topic", "")
             if topic and topic not in merged_optionality:
                 merged_optionality.append(f"[VP] {topic}")
@@ -193,7 +196,7 @@ class DiscoveryMerger(Agent):
         # Merge data gaps
         merged_gaps = list(internal.data_gaps)
         # Add key unanswered questions from external
-        analyst_sentiment = external.analyst_sentiment
+        analyst_sentiment = combined_external.analyst_sentiment
         if analyst_sentiment.get("key_debates"):
             for debate in analyst_sentiment["key_debates"]:
                 merged_gaps.append(f"[Analyst Debate] {debate}")
@@ -259,7 +262,7 @@ class DiscoveryMerger(Agent):
             merged_groups = self._create_default_groups(merged_threads)
 
         # Merge evidence IDs
-        merged_evidence = list(internal.evidence_ids) + list(external.evidence_ids)
+        merged_evidence = list(internal.evidence_ids) + list(combined_external.evidence_ids)
 
         # Merge ThreadBriefs from internal discovery
         merged_thread_briefs: list[ThreadBrief] = list(internal.thread_briefs)
@@ -278,7 +281,7 @@ class DiscoveryMerger(Agent):
                     hypotheses=[thread.value_driver_hypothesis] if thread.value_driver_hypothesis else [],
                     key_questions=thread.research_questions,
                     required_evidence=["External market research", "Competitor analysis"],
-                    key_evidence_ids=list(external.evidence_ids[:5]),
+                    key_evidence_ids=list(combined_external.evidence_ids[:5]),
                     confidence=0.6 if "[VP]" in thread.name else 0.5,
                 )
                 merged_thread_briefs.append(brief)
@@ -294,6 +297,7 @@ class DiscoveryMerger(Agent):
             conflicting_signals=merged_conflicts,
             evidence_ids=merged_evidence,
             thread_briefs=merged_thread_briefs,
+            searches_performed=getattr(internal, "searches_performed", []),
         )
 
         # Store merged ThreadBriefs in WorkspaceStore
@@ -319,6 +323,129 @@ class DiscoveryMerger(Agent):
         )
 
         return merged_output
+
+    def _normalize_external_outputs(
+        self,
+        external: ExternalDiscoveryOutput | list[ExternalDiscoveryOutput],
+    ) -> list[ExternalDiscoveryOutput]:
+        if isinstance(external, list):
+            return external
+        return [external]
+
+    def _combine_external_outputs(
+        self,
+        externals: list[ExternalDiscoveryOutput],
+    ) -> ExternalDiscoveryOutput:
+        """Combine multiple external discovery outputs into one."""
+        if not externals:
+            return ExternalDiscoveryOutput(
+                competitor_developments=[],
+                industry_news=[],
+                analyst_sentiment={},
+                market_discourse={},
+                strategic_shifts=[],
+                variant_perceptions=[],
+                suggested_threads=[],
+                critical_external_context=[],
+                searches_performed=[],
+                evidence_ids=[],
+                mode="combined",
+            )
+
+        def dedupe_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            seen: set[str] = set()
+            deduped: list[dict[str, Any]] = []
+            for item in items:
+                key = json.dumps(item, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(item)
+            return deduped
+
+        def merge_list_field(field_name: str) -> list[dict[str, Any]]:
+            combined: list[dict[str, Any]] = []
+            for output in externals:
+                combined.extend(getattr(output, field_name, []) or [])
+            return dedupe_dicts(combined)
+
+        def merge_text_list(field_name: str) -> list[str]:
+            combined: list[str] = []
+            for output in externals:
+                combined.extend(getattr(output, field_name, []) or [])
+            return list(dict.fromkeys(combined))
+
+        def merge_analyst_sentiment() -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            for output in externals:
+                sentiment = output.analyst_sentiment or {}
+                if not sentiment:
+                    continue
+                if not merged:
+                    merged = dict(sentiment)
+                    continue
+                merged_changes = merged.get("recent_changes", []) or []
+                merged_changes.extend(sentiment.get("recent_changes", []) or [])
+                merged["recent_changes"] = dedupe_dicts(merged_changes)
+                merged_debates = merged.get("key_debates", []) or []
+                for debate in sentiment.get("key_debates", []) or []:
+                    if debate not in merged_debates:
+                        merged_debates.append(debate)
+                merged["key_debates"] = merged_debates
+                for key in ["consensus", "average_rating", "bull_thesis", "bear_thesis"]:
+                    if not merged.get(key) and sentiment.get(key):
+                        merged[key] = sentiment.get(key)
+            return merged
+
+        def merge_market_discourse() -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            for output in externals:
+                discourse = output.market_discourse or {}
+                if not discourse:
+                    continue
+                if not merged:
+                    merged = dict(discourse)
+                    continue
+                merged_stories = merged.get("major_stories", []) or []
+                merged_stories.extend(discourse.get("major_stories", []) or [])
+                merged["major_stories"] = dedupe_dicts(merged_stories)
+                merged_controversies = merged.get("controversies", []) or []
+                for item in discourse.get("controversies", []) or []:
+                    if item not in merged_controversies:
+                        merged_controversies.append(item)
+                merged["controversies"] = merged_controversies
+                if not merged.get("retail_sentiment") and discourse.get("retail_sentiment"):
+                    merged["retail_sentiment"] = discourse.get("retail_sentiment")
+                merged_viral = merged.get("viral_topics", []) or []
+                for item in discourse.get("viral_topics", []) or []:
+                    if item not in merged_viral:
+                        merged_viral.append(item)
+                merged["viral_topics"] = merged_viral
+            return merged
+
+        evidence_ids: list[str] = []
+        searches_performed: list[dict[str, str]] = []
+        analysis_date = ""
+        for output in externals:
+            evidence_ids.extend(output.evidence_ids or [])
+            searches_performed.extend(output.searches_performed or [])
+            if not analysis_date and output.analysis_date:
+                analysis_date = output.analysis_date
+
+        return ExternalDiscoveryOutput(
+            competitor_developments=merge_list_field("competitor_developments"),
+            industry_news=merge_list_field("industry_news"),
+            analyst_sentiment=merge_analyst_sentiment(),
+            market_discourse=merge_market_discourse(),
+            strategic_shifts=merge_list_field("strategic_shifts"),
+            variant_perceptions=merge_list_field("variant_perceptions"),
+            suggested_threads=merge_list_field("suggested_threads"),
+            critical_external_context=merge_text_list("critical_external_context"),
+            searches_performed=searches_performed,
+            evidence_ids=list(dict.fromkeys(evidence_ids)),
+            analysis_date=analysis_date,
+            mode="combined",
+        )
 
     def _create_default_groups(
         self,
@@ -390,7 +517,7 @@ class DiscoveryMerger(Agent):
         Args:
             run_state: Current run state.
             internal: Internal discovery output.
-            external: External discovery output.
+            external: External discovery output(s).
 
         Returns:
             Merged DiscoveryOutput.

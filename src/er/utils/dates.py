@@ -136,6 +136,7 @@ def format_quarters_for_prompt(year: int, quarter: int) -> str:
 
     quarter_list = ", ".join(format_quarter(y, q) for y, q in quarters)
 
-    return f"""{latest} is the MOST RECENT quarter with available data.
-The last 4 quarters are: {quarter_list}.
-Use {latest} as your baseline for all current period references."""
+    return f"""{latest} is the MOST RECENT quarter with ACTUAL REPORTED earnings (not estimates).
+All financial data for {latest} and earlier quarters represents ACTUAL FILED results from SEC filings.
+The last 4 quarters with reported actuals: {quarter_list}.
+Use {latest} as your baseline. This is real data, not analyst estimates."""

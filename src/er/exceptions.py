@@ -129,3 +129,9 @@ class CoordinatorError(ERError):
     """
 
     pass
+
+
+class PipelinePaused(ERError):
+    """Raised when the pipeline pauses for human approval."""
+
+    pass

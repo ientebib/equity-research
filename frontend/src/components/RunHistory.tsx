@@ -28,7 +28,6 @@ interface RunHistoryProps {
   onSelectRun: (runId: string) => void;
   onNewRun: () => void;
   selectedRunId?: string | null;
-  activeRunId?: string | null;
   className?: string;
 }
 
@@ -44,7 +43,7 @@ const verdictColors = {
   HOLD: 'text-[var(--kp-amber)]',
 };
 
-export function RunHistory({ onSelectRun, onNewRun, selectedRunId, activeRunId, className }: RunHistoryProps) {
+export function RunHistory({ onSelectRun, onNewRun, selectedRunId, className }: RunHistoryProps) {
   const [runs, setRuns] = useState<{ completed: Run[]; active: Run[] }>({ completed: [], active: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

@@ -838,16 +838,41 @@ class CompanyContext:
     def for_discovery(self) -> str:
         """Context view for Stage 2 Discovery.
 
-        Includes: Full financials, news headlines, transcript metadata (not full text).
+        Includes: Full financials, news headlines, transcripts with latest quarter full text.
         Optimized for initial research thread identification.
         """
         import json
 
         payload = self.to_json_payload()
 
-        # Keep transcript metadata but not full text (Discovery identifies threads, not deep analysis)
+        # Keep latest transcript full text; truncate older transcripts for discovery
         if "earnings_transcripts" in payload:
-            for t in payload["earnings_transcripts"]:
+            transcripts = payload["earnings_transcripts"]
+            latest_idx = 0
+            latest_dt = None
+            for idx, t in enumerate(transcripts):
+                dt = None
+                date_str = t.get("date")
+                if date_str:
+                    try:
+                        dt = datetime.fromisoformat(date_str)
+                    except ValueError:
+                        dt = None
+                if dt is None:
+                    year = t.get("year")
+                    quarter = t.get("quarter")
+                    if year and quarter:
+                        try:
+                            dt = datetime(int(year), int(quarter) * 3, 1)
+                        except (TypeError, ValueError):
+                            dt = None
+                if dt and (latest_dt is None or dt > latest_dt):
+                    latest_dt = dt
+                    latest_idx = idx
+
+            for idx, t in enumerate(transcripts):
+                if idx == latest_idx:
+                    continue
                 if "full_text" in t and len(t.get("full_text", "")) > 2000:
                     # Keep first 2000 chars as preview
                     t["full_text"] = t["full_text"][:2000] + "\n[...transcript continues...]"
@@ -1185,6 +1210,7 @@ class ResearchGroup:
 
     # Research guidance
     key_questions: list[str]
+    review_guidance: str = ""  # Human guidance for this group
 
     # Grouping justification (new fields from fixed prompt)
     grouping_rationale: str = ""  # Why these verticals belong together
@@ -1209,6 +1235,9 @@ class ThreadBrief:
     key_questions: list[str]  # Questions to answer
     required_evidence: list[str]  # What evidence is needed
     key_evidence_ids: list[str] = field(default_factory=list)  # Supporting evidence
+    recent_developments: list[str] = field(default_factory=list)  # 30/60/90-day updates
+    recency_questions: list[str] = field(default_factory=list)  # Questions to expand scope
+    recency_evidence_ids: list[str] = field(default_factory=list)  # Evidence IDs for recency
     confidence: float = 0.5  # 0.0-1.0 confidence in importance
 
     def to_dict(self) -> dict[str, Any]:
@@ -1220,6 +1249,9 @@ class ThreadBrief:
             "key_questions": self.key_questions,
             "required_evidence": self.required_evidence,
             "key_evidence_ids": self.key_evidence_ids,
+            "recent_developments": self.recent_developments,
+            "recency_questions": self.recency_questions,
+            "recency_evidence_ids": self.recency_evidence_ids,
             "confidence": self.confidence,
         }
 
@@ -1255,6 +1287,17 @@ class DiscoveryOutput:
 
     # ThreadBriefs - preserves WHY each thread was prioritized
     thread_briefs: list[ThreadBrief] = field(default_factory=list)
+
+    # Search metadata (internal discovery web search queries)
+    searches_performed: list[dict[str, str]] = field(default_factory=list)
+
+    # Lens outputs from Discovery subagents (competitive analysis, analyst views, etc.)
+    # This preserves the raw findings so Deep Research can build on them
+    lens_outputs: dict = field(default_factory=dict)
+
+    # External threats identified by threat-analysis subagent
+    # Each threat is mapped to affected verticals
+    external_threats: list = field(default_factory=list)
 
     # Discovery metadata
     discovery_timestamp: datetime = field(default_factory=utc_now)
@@ -1311,6 +1354,7 @@ class Fact:
     category: FactCategory
     evidence_id: str  # ID of supporting evidence
     source: str  # Human-readable source (e.g., "SEC 10-Q", "Bloomberg")
+    evidence_ids: list[str] = field(default_factory=list)  # Optional multi-cite evidence IDs
     source_date: str | None = None  # When the source was published
     confidence: float = 0.5  # 0.0-1.0 confidence in this fact
     vertical_id: str | None = None  # Which vertical this fact relates to
@@ -1322,6 +1366,7 @@ class Fact:
             "statement": self.statement,
             "category": self.category.value,
             "evidence_id": self.evidence_id,
+            "evidence_ids": self.evidence_ids,
             "source": self.source,
             "source_date": self.source_date,
             "confidence": self.confidence,
@@ -1331,11 +1376,15 @@ class Fact:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Fact":
         """Create Fact from dict."""
+        evidence_ids = data.get("evidence_ids")
+        if not evidence_ids and data.get("evidence_id"):
+            evidence_ids = [data.get("evidence_id")]
         return cls(
             fact_id=data["fact_id"],
             statement=data["statement"],
             category=FactCategory(data["category"]),
-            evidence_id=data["evidence_id"],
+            evidence_id=data.get("evidence_id", ""),
+            evidence_ids=evidence_ids or [],
             source=data["source"],
             source_date=data.get("source_date"),
             confidence=data.get("confidence", 0.5),

@@ -15,6 +15,7 @@ from er.evidence.store import EvidenceStore
 from er.llm.router import LLMRouter, AgentRole
 from er.logging import get_logger
 from er.retrieval.fetch import FetchResult
+from er.security.sanitizer import InputSanitizer, ThreatLevel
 from er.types import SourceTier, ToSRisk
 from er.workspace.store import WorkspaceStore
 
@@ -135,8 +136,35 @@ Return ONLY valid JSON."""
             )
             return None
 
+        # Sanitize evidence text before it enters any LLM prompt
+        sanitizer = InputSanitizer()
+        sanitization = sanitizer.sanitize(fetch_result.text, source=fetch_result.url)
+        if sanitization.threat_level in (ThreatLevel.HIGH, ThreatLevel.CRITICAL):
+            sanitized_text = "[Content blocked due to security concerns]"
+        else:
+            sanitized_text = sanitization.sanitized_text
+
         # Truncate content if too long (keep first 8000 chars for summarization)
-        content = fetch_result.text[:8000]
+        content = sanitized_text[:8000]
+
+        # Store sanitization metadata when changes or threats detected
+        if self.workspace_store and (
+            sanitization.modifications_made or sanitization.threat_level != ThreatLevel.NONE
+        ):
+            self.workspace_store.put_artifact(
+                artifact_type="sanitized_evidence",
+                producer="evidence_card_generator",
+                json_obj={
+                    "url": fetch_result.url,
+                    "threat_level": sanitization.threat_level.value,
+                    "threats_detected": sanitization.threats_detected,
+                    "modifications_made": sanitization.modifications_made,
+                    "original_length": sanitization.original_length,
+                    "sanitized_length": sanitization.sanitized_length,
+                },
+                summary=f"Sanitized evidence ({sanitization.threat_level.value}) for {fetch_result.url}",
+                evidence_ids=[fetch_result.evidence_id] if fetch_result.evidence_id else [],
+            )
 
         # Build prompt
         prompt = self.SUMMARIZE_PROMPT.format(

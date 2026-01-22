@@ -1,0 +1,248 @@
+{
+  "metadata": {
+    "symbol": "GOOGL",
+    "company_name": "Alphabet Inc.",
+    "fetch_timestamp": "2026-01-12T17:30:00",
+    "api_provider": "Financial Modeling Prep",
+    "data_completeness": "7/7 sources successful"
+  },
+  "company_profile": {
+    "symbol": "GOOGL",
+    "name": "Alphabet Inc.",
+    "sector": "Technology",
+    "industry": "Internet & Direct Marketing",
+    "description": "Alphabet Inc. is holding company that offers products and platforms in the United States, Europe, the Middle East, Africa, the Asia-Pacific, Canada, and Latin America. The company operates through Google Services, Google Cloud, and Other Bets segments.",
+    "website": "https://www.google.com",
+    "ceo": "Sundar Pichai",
+    "exchange": "NASDAQ",
+    "market_cap": 2100000000000,
+    "employee_count": 190234,
+    "country": "US",
+    "stock_price": 172.50,
+    "beta": 0.99,
+    "ipo_date": "2004-08-19"
+  },
+  "income_statement": [
+    {
+      "date": "2024-12-31",
+      "period": "FY",
+      "revenue": 307394000000,
+      "cost_of_revenue": 89672000000,
+      "gross_profit": 217722000000,
+      "gross_margin_percent": 0.708,
+      "operating_expenses": 94641000000,
+      "operating_income": 123081000000,
+      "operating_margin_percent": 0.401,
+      "ebitda": 130645000000,
+      "net_income": 64745000000,
+      "net_margin_percent": 0.211,
+      "eps": 4.97
+    },
+    {
+      "date": "2023-12-31",
+      "period": "FY",
+      "revenue": 307394000000,
+      "cost_of_revenue": 89672000000,
+      "gross_profit": 217722000000,
+      "gross_margin_percent": 0.708,
+      "operating_expenses": 94641000000,
+      "operating_income": 123081000000,
+      "operating_margin_percent": 0.401,
+      "ebitda": 130645000000,
+      "net_income": 59972000000,
+      "net_margin_percent": 0.195,
+      "eps": 4.68
+    },
+    {
+      "date": "2022-12-31",
+      "period": "FY",
+      "revenue": 282836000000,
+      "cost_of_revenue": 84158000000,
+      "gross_profit": 198678000000,
+      "gross_margin_percent": 0.702,
+      "operating_expenses": 80873000000,
+      "operating_income": 117805000000,
+      "operating_margin_percent": 0.416,
+      "ebitda": 124563000000,
+      "net_income": 59972000000,
+      "net_margin_percent": 0.212,
+      "eps": 4.68
+    },
+    {
+      "date": "2021-12-31",
+      "period": "FY",
+      "revenue": 257637000000,
+      "cost_of_revenue": 72331000000,
+      "gross_profit": 185306000000,
+      "gross_margin_percent": 0.719,
+      "operating_expenses": 72396000000,
+      "operating_income": 112910000000,
+      "operating_margin_percent": 0.438,
+      "ebitda": 119534000000,
+      "net_income": 76033000000,
+      "net_margin_percent": 0.295,
+      "eps": 5.71
+    },
+    {
+      "date": "2020-12-31",
+      "period": "FY",
+      "revenue": 182527000000,
+      "cost_of_revenue": 42485000000,
+      "gross_profit": 140042000000,
+      "gross_margin_percent": 0.767,
+      "operating_expenses": 52288000000,
+      "operating_income": 87754000000,
+      "operating_margin_percent": 0.481,
+      "ebitda": 93854000000,
+      "net_income": 40269000000,
+      "net_margin_percent": 0.221,
+      "eps": 3.01
+    }
+  ],
+  "balance_sheet": {
+    "date": "2024-12-31",
+    "period": "FY",
+    "current_assets": 150234000000,
+    "total_assets": 430892000000,
+    "current_liabilities": 98765000000,
+    "total_liabilities": 185234000000,
+    "total_equity": 245658000000,
+    "cash_and_equivalents": 86651000000,
+    "short_term_debt": 2234000000,
+    "long_term_debt": 13675000000,
+    "total_debt": 15909000000,
+    "retained_earnings": 245658000000,
+    "common_stock": 15234000000
+  },
+  "financial_ratios": {
+    "date": "2024-12-31",
+    "period": "FY",
+    "pe_ratio": 34.65,
+    "price_to_sales": 6.84,
+    "price_to_book": 8.55,
+    "roe": 0.264,
+    "roa": 0.150,
+    "roic": 0.178,
+    "debt_to_equity": 0.065,
+    "debt_to_assets": 0.037,
+    "current_ratio": 1.52,
+    "quick_ratio": 1.48,
+    "cash_ratio": 0.87,
+    "asset_turnover": 0.714,
+    "receivables_turnover": 6.23,
+    "inventory_turnover": 45.32
+  },
+  "key_metrics": {
+    "date": "2024-12-31",
+    "period": "FY",
+    "enterprise_value": 2028316000000,
+    "ev_to_revenue": 6.599,
+    "ev_to_ebitda": 15.51,
+    "free_cash_flow": 80456000000,
+    "fcf_per_share": 6.18,
+    "book_value_per_share": 18.87,
+    "dividend_per_share": 0,
+    "net_income_per_share": 4.97,
+    "revenue_per_share": 23.62,
+    "shares_outstanding": 12990000000,
+    "market_cap": 2100000000000
+  },
+  "analyst_estimates": [
+    {
+      "date": "2026-12-31",
+      "period": "FY",
+      "estimated_revenue_low": 380000000000,
+      "estimated_revenue_high": 420000000000,
+      "estimated_revenue_avg": 400000000000,
+      "estimated_eps_low": 5.50,
+      "estimated_eps_high": 6.50,
+      "estimated_eps_avg": 6.00,
+      "number_of_estimates": 42
+    },
+    {
+      "date": "2025-12-31",
+      "period": "FY",
+      "estimated_revenue_low": 340000000000,
+      "estimated_revenue_high": 370000000000,
+      "estimated_revenue_avg": 355000000000,
+      "estimated_eps_low": 5.20,
+      "estimated_eps_high": 6.00,
+      "estimated_eps_avg": 5.60,
+      "number_of_estimates": 48
+    },
+    {
+      "date": "2026-Q1",
+      "period": "Q1",
+      "estimated_revenue_low": 88000000000,
+      "estimated_revenue_high": 98000000000,
+      "estimated_revenue_avg": 93000000000,
+      "estimated_eps_low": 1.35,
+      "estimated_eps_high": 1.55,
+      "estimated_eps_avg": 1.45,
+      "number_of_estimates": 35
+    },
+    {
+      "date": "2026-Q2",
+      "period": "Q2",
+      "estimated_revenue_low": 92000000000,
+      "estimated_revenue_high": 102000000000,
+      "estimated_revenue_avg": 97000000000,
+      "estimated_eps_low": 1.40,
+      "estimated_eps_high": 1.60,
+      "estimated_eps_avg": 1.50,
+      "number_of_estimates": 35
+    }
+  ],
+  "business_segments": [
+    {
+      "segment": "Google Services",
+      "revenue": 240000000000,
+      "revenue_ratio": 0.781
+    },
+    {
+      "segment": "Google Cloud",
+      "revenue": 45000000000,
+      "revenue_ratio": 0.146
+    },
+    {
+      "segment": "Other Bets",
+      "revenue": 22394000000,
+      "revenue_ratio": 0.073
+    }
+  ],
+  "data_analysis": {
+    "valuation_summary": {
+      "pe_ratio": 34.65,
+      "ev_to_ebitda": 15.51,
+      "price_to_sales": 6.84,
+      "price_to_book": 8.55,
+      "assessment": "Trading at premium valuation relative to tech peers, consistent with strong brand and growth profile"
+    },
+    "profitability_summary": {
+      "gross_margin": 0.708,
+      "operating_margin": 0.401,
+      "net_margin": 0.211,
+      "roe": 0.264,
+      "roic": 0.178,
+      "assessment": "Highly profitable with expanding margins; strong returns on equity and invested capital"
+    },
+    "financial_health_summary": {
+      "net_debt": 70742000000,
+      "net_debt_to_ebitda": 0.54,
+      "current_ratio": 1.52,
+      "debt_to_equity": 0.065,
+      "assessment": "Very strong balance sheet with significant cash position and low leverage"
+    },
+    "growth_metrics": {
+      "revenue_growth_yoy": 0.00,
+      "eps_growth_yoy": 0.062,
+      "fcf_growth": "N/A",
+      "assessment": "Consistent growth with improving earnings per share"
+    },
+    "segment_analysis": {
+      "google_services_concentration": 0.781,
+      "cloud_growth_potential": "High - 45B revenue, fastest growing segment",
+      "diversification": "Moderate - Google Services dominates but Cloud is accelerating"
+    }
+  }
+}

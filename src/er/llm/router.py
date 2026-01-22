@@ -57,23 +57,23 @@ class EscalationLevel(Enum):
 DEFAULT_MODEL_MAP: dict[AgentRole, dict[EscalationLevel, tuple[str, str]]] = {
     # (model, provider)
     AgentRole.ORCHESTRATION: {
-        EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
-        EscalationLevel.CRITICAL: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o-mini", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
+        EscalationLevel.CRITICAL: ("gpt-4o", "openai"),
     },
     AgentRole.DISCOVERY: {
-        EscalationLevel.NORMAL: ("gpt-5.2", "openai"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
         EscalationLevel.CRITICAL: ("claude-sonnet-4-5-20250929", "anthropic"),
     },
     AgentRole.DECOMPOSITION: {
-        EscalationLevel.NORMAL: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o", "openai"),
         EscalationLevel.ELEVATED: ("claude-sonnet-4-5-20250929", "anthropic"),
         EscalationLevel.CRITICAL: ("claude-opus-4-5-20251101", "anthropic"),
     },
     AgentRole.RESEARCH: {
-        EscalationLevel.NORMAL: ("gemini-3-pro", "google"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gemini-2.5-pro", "google"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
         EscalationLevel.CRITICAL: ("claude-sonnet-4-5-20250929", "anthropic"),
     },
     AgentRole.SYNTHESIS: {
@@ -87,19 +87,55 @@ DEFAULT_MODEL_MAP: dict[AgentRole, dict[EscalationLevel, tuple[str, str]]] = {
         EscalationLevel.CRITICAL: ("claude-opus-4-5-20251101", "anthropic"),
     },
     AgentRole.FACTCHECK: {
-        EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
-        EscalationLevel.CRITICAL: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o-mini", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
+        EscalationLevel.CRITICAL: ("gpt-4o", "openai"),
     },
     AgentRole.OUTPUT: {
-        EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o-mini", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
         EscalationLevel.CRITICAL: ("claude-sonnet-4-5-20250929", "anthropic"),
     },
     AgentRole.WORKHORSE: {
-        EscalationLevel.NORMAL: ("gpt-5.2-mini", "openai"),
-        EscalationLevel.ELEVATED: ("gpt-5.2", "openai"),
-        EscalationLevel.CRITICAL: ("gpt-5.2", "openai"),
+        EscalationLevel.NORMAL: ("gpt-4o-mini", "openai"),
+        EscalationLevel.ELEVATED: ("gpt-4o", "openai"),
+        EscalationLevel.CRITICAL: ("gpt-4o", "openai"),
+    },
+}
+
+PREFERRED_PROVIDER_MODELS: dict[str, dict[AgentRole, str]] = {
+    "google": {
+        AgentRole.ORCHESTRATION: "gemini-2.5-flash",
+        AgentRole.DISCOVERY: "gemini-2.5-pro",
+        AgentRole.DECOMPOSITION: "gemini-2.5-pro",
+        AgentRole.RESEARCH: "gemini-2.5-pro",
+        AgentRole.SYNTHESIS: "gemini-2.5-pro",
+        AgentRole.JUDGE: "gemini-2.5-pro",
+        AgentRole.FACTCHECK: "gemini-2.5-flash",
+        AgentRole.OUTPUT: "gemini-2.5-flash",
+        AgentRole.WORKHORSE: "gemini-2.5-flash",
+    },
+    "openai": {
+        AgentRole.ORCHESTRATION: "gpt-4o-mini",
+        AgentRole.DISCOVERY: "gpt-4o",
+        AgentRole.DECOMPOSITION: "gpt-4o",
+        AgentRole.RESEARCH: "gpt-4o",
+        AgentRole.SYNTHESIS: "gpt-4o",
+        AgentRole.JUDGE: "gpt-4o",
+        AgentRole.FACTCHECK: "gpt-4o-mini",
+        AgentRole.OUTPUT: "gpt-4o-mini",
+        AgentRole.WORKHORSE: "gpt-4o-mini",
+    },
+    "anthropic": {
+        AgentRole.ORCHESTRATION: "claude-sonnet-4-5-20250929",
+        AgentRole.DISCOVERY: "claude-sonnet-4-5-20250929",
+        AgentRole.DECOMPOSITION: "claude-sonnet-4-5-20250929",
+        AgentRole.RESEARCH: "claude-sonnet-4-5-20250929",
+        AgentRole.SYNTHESIS: "claude-sonnet-4-5-20250929",
+        AgentRole.JUDGE: "claude-opus-4-5-20251101",
+        AgentRole.FACTCHECK: "claude-sonnet-4-5-20250929",
+        AgentRole.OUTPUT: "claude-sonnet-4-5-20250929",
+        AgentRole.WORKHORSE: "claude-sonnet-4-5-20250929",
     },
 }
 
@@ -157,6 +193,22 @@ class LLMRouter:
         # Override from settings if configured
         s = self._settings
 
+        preferred = s.preferred_provider
+        if preferred:
+            model_map = {}
+            provider_models = PREFERRED_PROVIDER_MODELS.get(preferred, {})
+            for role in AgentRole:
+                if provider_models:
+                    model = provider_models.get(role, provider_models.get(AgentRole.WORKHORSE, s.model_workhorse))
+                else:
+                    model = s.model_workhorse
+                model_map[role] = {
+                    EscalationLevel.NORMAL: (model, preferred),
+                    EscalationLevel.ELEVATED: (model, preferred),
+                    EscalationLevel.CRITICAL: (model, preferred),
+                }
+            return model_map
+
         # Override workhorse model for orchestration/factcheck/output/workhorse
         if s.model_workhorse:
             provider = self._infer_provider(s.model_workhorse)
@@ -181,6 +233,11 @@ class LLMRouter:
             model_map[AgentRole.SYNTHESIS][EscalationLevel.ELEVATED] = (s.model_synthesis, provider)
 
         return model_map
+
+    @property
+    def preferred_provider(self) -> str | None:
+        """Return preferred provider if configured."""
+        return self._settings.preferred_provider
 
     def _infer_provider(self, model: str) -> str:
         """Infer provider from model name.
@@ -388,6 +445,111 @@ class LLMRouter:
             logger.debug("Recorded cost", cost_usd=cost)
 
         return response
+
+    async def complete_with_web_search(
+        self,
+        role: AgentRole,
+        messages: list[dict[str, Any]],
+        escalation: EscalationLevel = EscalationLevel.NORMAL,
+        reasoning_effort: str | None = None,
+        agent_name: str | None = None,
+        phase: str | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Send a completion request with provider-specific web search/grounding."""
+        if self._budget_tracker and self._budget_tracker.is_exceeded():
+            raise BudgetExceededError("Budget limit exceeded")
+
+        if self._dry_run:
+            model, provider = self._model_map[role][escalation]
+            return self._get_dry_run_response(role, model, provider)
+
+        client, model = self.get_client_and_model(role, escalation)
+
+        request = LLMRequest(
+            messages=messages,
+            model=model,
+            temperature=kwargs.get("temperature"),
+            max_tokens=kwargs.get("max_tokens"),
+            stop=kwargs.get("stop"),
+            response_format=kwargs.get("response_format"),
+        )
+
+        if isinstance(client, OpenAIClient):
+            response = await client.complete_with_web_search(
+                request,
+                reasoning_effort=reasoning_effort or "medium",
+            )
+        elif isinstance(client, AnthropicClient):
+            response = await client.complete_with_web_search(request)
+        elif isinstance(client, GeminiClient):
+            response = await client.complete_with_grounding(request, enable_google_search=True)
+        else:
+            response = await client.complete(request)
+
+        logger.info(
+            "LLM web search completed",
+            role=role.value,
+            model=response.model,
+            provider=response.provider,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            latency_ms=response.latency_ms,
+            agent=agent_name,
+            phase=phase,
+        )
+
+        if self._budget_tracker:
+            cost = self._budget_tracker.record_usage(
+                provider=response.provider,
+                model=response.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                agent=agent_name or role.value,
+                phase=phase or "unknown",
+            )
+            logger.debug("Recorded cost", cost_usd=cost)
+
+        return response
+
+    async def call(
+        self,
+        role: AgentRole,
+        messages: list[dict[str, Any]],
+        escalation: EscalationLevel = EscalationLevel.NORMAL,
+        agent_name: str | None = None,
+        phase: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Backward-compatible wrapper that returns a dict response.
+
+        Some agents expect a dict-like response (response.get("content")).
+        """
+        response = await self.complete(
+            role=role,
+            messages=messages,
+            escalation=escalation,
+            agent_name=agent_name,
+            phase=phase,
+            **kwargs,
+        )
+        tool_calls = None
+        if response.tool_calls:
+            tool_calls = [
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+                for call in response.tool_calls
+            ]
+        return {
+            "content": response.content,
+            "model": response.model,
+            "provider": response.provider,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "tool_calls": tool_calls,
+            "finish_reason": response.finish_reason,
+            "latency_ms": response.latency_ms,
+            "metadata": response.metadata,
+        }
 
     def _get_dry_run_response(
         self,
