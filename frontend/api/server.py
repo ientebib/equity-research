@@ -28,7 +28,6 @@ from pydantic import BaseModel
 
 from er.exceptions import PipelinePaused
 from er.config import Settings
-from er.llm.router import LLMRouter, AgentRole, EscalationLevel
 from er.manifest import RunManifest
 from er.types import Phase
 from er.workspace.store import WorkspaceStore
@@ -297,7 +296,6 @@ def load_run_data(run_id: str) -> dict:
         ("stage3_5", "stage3_5_verification.json"),
         ("stage3_75", "stage3_75_integration.json"),
         ("stage4_claude", "stage4_claude_synthesis.json"),
-        ("stage4_gpt", "stage4_gpt_synthesis.json"),
         ("stage5", "stage5_editorial_feedback.json"),
         ("stage6", "stage6_final_report.json"),
     ]
@@ -341,10 +339,9 @@ def load_run_data(run_id: str) -> dict:
     if "stage5" in data["stages"]:
         s5 = data["stages"]["stage5"]
         data["editorial_feedback"] = {
-            "preferred_synthesis": s5.get("preferred_synthesis"),
-            "preference_reasoning": s5.get("preference_reasoning"),
+            "preferred_synthesis": s5.get("preferred_synthesis", "claude"),
+            "preference_reasoning": s5.get("preference_reasoning") or s5.get("revision_instructions", ""),
             "claude_score": s5.get("claude_score"),
-            "gpt_score": s5.get("gpt_score"),
             "key_differentiators": s5.get("key_differentiators"),
             "key_strengths": s5.get("key_strengths"),
             "key_weaknesses": s5.get("key_weaknesses"),
@@ -416,7 +413,7 @@ def load_run_data(run_id: str) -> dict:
             "foundational_verticals": s375.get("foundational_verticals", []),
         }
 
-    # Extract both syntheses for comparison
+    # Extract Claude synthesis (Anthropic-only)
     if "stage4_claude" in data["stages"]:
         s4c = data["stages"]["stage4_claude"]
         data["claude_synthesis"] = {
@@ -425,16 +422,6 @@ def load_run_data(run_id: str) -> dict:
             "confidence": s4c.get("overall_confidence"),
             "thesis_summary": s4c.get("thesis_summary"),
             "full_report": s4c.get("full_report"),
-        }
-
-    if "stage4_gpt" in data["stages"]:
-        s4g = data["stages"]["stage4_gpt"]
-        data["gpt_synthesis"] = {
-            "investment_view": s4g.get("investment_view"),
-            "conviction": s4g.get("conviction"),
-            "confidence": s4g.get("overall_confidence"),
-            "thesis_summary": s4g.get("thesis_summary"),
-            "full_report": s4g.get("full_report"),
         }
 
     return data
@@ -541,14 +528,16 @@ async def run_pipeline_with_events(session: RunSession, resume: bool = False):
             session.current_stage = stage
             session.cost = cost_usd
 
-            # Determine agent name from stage and detail
+            # Determine agent name from stage and detail (Anthropic-only)
             agent_name = stage_name
-            if "Claude" in detail:
+            if "Opus" in detail or "opus" in detail:
                 agent_name = "Claude Opus"
-            elif "GPT" in detail:
-                agent_name = "GPT-5.2"
-            elif "Gemini" in detail:
-                agent_name = "Gemini Deep Research"
+            elif "Sonnet" in detail or "sonnet" in detail:
+                agent_name = "Claude Sonnet"
+            elif "Haiku" in detail or "haiku" in detail:
+                agent_name = "Claude Haiku"
+            elif "Claude" in detail:
+                agent_name = "Claude"
 
             session.current_agent = agent_name
 
@@ -695,7 +684,7 @@ async def get_run(run_id: str):
                 disk_data = load_run_data(run_id)
                 for key in ("costs", "report", "structured_report", "editorial_feedback",
                             "discovery", "verticals", "verification", "integration", "claude_synthesis",
-                            "gpt_synthesis", "stages", "manifest"):
+                            "stages", "manifest"):
                     if key in disk_data:
                         payload[key] = disk_data[key]
             except Exception:
@@ -976,43 +965,37 @@ async def event_generator(run_id: str) -> AsyncGenerator[str, None]:
 
 # ============== Config/Prompt Endpoints ==============
 
+# Anthropic-only agent blueprints
 STAGE_AGENT_BLUEPRINTS = [
-    {"stage": 1, "name": "DataOrchestrator", "role": None, "file": "data_orchestrator.py",
+    {"stage": 1, "name": "DataOrchestrator", "model": "n/a", "file": "data_orchestrator.py",
      "description": "Fetches SEC filings, financials, news, and analyst data from FMP API"},
-    {"stage": 2, "name": "DiscoveryAgent", "role": AgentRole.DISCOVERY, "file": "discovery.py",
-     "description": "Internal discovery using 7 analytical lenses to identify value drivers"},
-    {"stage": 2, "name": "ExternalDiscoveryAgent (Light)", "role": AgentRole.WORKHORSE, "file": "external_discovery.py",
-     "description": "Market-wide competitive intelligence with web search"},
-    {"stage": 2, "name": "ExternalDiscoveryAgent (Anchored)", "role": AgentRole.WORKHORSE, "file": "external_discovery.py",
-     "description": "Company-anchored competitive intelligence with web search"},
-    {"stage": 3, "name": "VerticalAnalystAgent", "role": AgentRole.RESEARCH, "file": "vertical_analyst.py",
-     "description": "Deep research on each vertical using evidence cards"},
-    {"stage": 4, "name": "SynthesizerAgent", "role": AgentRole.SYNTHESIS, "file": "synthesizer.py",
-     "description": "Synthesizes all research into investment thesis"},
-    {"stage": 5, "name": "JudgeAgent", "role": AgentRole.JUDGE, "file": "judge.py",
-     "description": "Compares syntheses and produces editorial feedback"},
-    {"stage": 6, "name": "Revision", "role": AgentRole.SYNTHESIS, "file": "synthesizer.py",
-     "description": "Winner revises based on judge feedback"},
+    {"stage": 2, "name": "AnthropicDiscoveryAgent", "model": "claude-sonnet-4-5-20250929", "file": "discovery_anthropic.py",
+     "description": "Discovery using 7 analytical lenses with Claude Agent SDK"},
+    {"stage": 3, "name": "DeepResearchSubagents", "model": "claude-sonnet-4-5-20250929", "file": "anthropic_sdk_agent.py",
+     "description": "Deep research on each thread using Claude subagents"},
+    {"stage": 3.5, "name": "VerificationAgent", "model": "claude-3-5-haiku-20241022", "file": "verifier.py",
+     "description": "Verifies facts against ground truth financial data"},
+    {"stage": 3.75, "name": "IntegratorAgent", "model": "claude-3-5-haiku-20241022", "file": "integrator.py",
+     "description": "Finds cross-vertical patterns and dependencies"},
+    {"stage": 4, "name": "SynthesizerAgent", "model": "claude-opus-4-5-20251101", "file": "anthropic_sdk_agent.py",
+     "description": "Synthesizes all research into investment thesis with extended thinking"},
+    {"stage": 5, "name": "JudgeAgent", "model": "claude-opus-4-5-20251101", "file": "judge.py",
+     "description": "Editorial review and feedback generation"},
+    {"stage": 6, "name": "Revision", "model": "claude-opus-4-5-20251101", "file": "anthropic_sdk_agent.py",
+     "description": "Revises synthesis based on judge feedback"},
 ]
 
 
 @app.get("/config/agents")
 async def get_agents():
-    """Get all agent configurations."""
-    settings = Settings()
-    router = LLMRouter(settings=settings)
+    """Get all agent configurations (Anthropic-only)."""
     agents = []
     for blueprint in STAGE_AGENT_BLUEPRINTS:
-        role = blueprint.get("role")
-        model = "n/a"
-        provider = "n/a"
-        if role is not None:
-            model, provider = router._model_map[role][EscalationLevel.NORMAL]
         agent = {
             "stage": blueprint["stage"],
             "name": blueprint["name"],
-            "model": model,
-            "provider": provider,
+            "model": blueprint["model"],
+            "provider": "anthropic",
             "file": blueprint["file"],
             "description": blueprint["description"],
         }

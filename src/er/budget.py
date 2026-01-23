@@ -1,7 +1,8 @@
 """
 Budget tracking for the equity research system.
 
-Tracks token usage and costs across providers, agents, and phases.
+Tracks token usage and costs for Anthropic Claude models.
+This is an Anthropic-only system using Claude via the Agent SDK.
 """
 
 from __future__ import annotations
@@ -19,28 +20,8 @@ logger = get_logger(__name__)
 
 # Cost per million tokens (as of January 2026)
 # Format: (input_cost_per_million, output_cost_per_million)
-# Sources: OpenAI Platform, Anthropic Pricing docs
+# Source: Anthropic Pricing docs
 MODEL_COSTS: dict[str, tuple[float, float]] = {
-    # OpenAI GPT-5.2
-    "gpt-5.2-2025-12-11": (1.75, 14.00),
-    "gpt-5.2": (1.75, 14.00),
-    "gpt-5.2-pro": (3.50, 28.00),
-    "gpt-5.2-mini": (0.30, 1.20),
-    "gpt-5.2-mini-2025-12-11": (0.30, 1.20),
-    # OpenAI o3/o4 Reasoning models
-    "o3-mini": (1.10, 4.40),
-    "o3-mini-2025-06-26": (1.10, 4.40),
-    "o4-mini": (1.10, 4.40),
-    "o4-mini-2025-06-26": (1.10, 4.40),
-    # OpenAI Deep Research models (higher output cost due to research)
-    "o3-deep-research": (2.00, 8.00),
-    "o3-deep-research-2025-06-26": (2.00, 8.00),
-    "o4-mini-deep-research": (2.00, 8.00),
-    "o4-mini-deep-research-2025-06-26": (2.00, 8.00),
-    # OpenAI legacy
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o": (2.50, 10.00),
-    "gpt-4-turbo": (10.00, 30.00),
     # Anthropic Claude 4.5
     "claude-opus-4-5-20251101": (15.00, 75.00),
     "claude-opus-4.5": (15.00, 75.00),
@@ -53,13 +34,6 @@ MODEL_COSTS: dict[str, tuple[float, float]] = {
     "claude-3-5-sonnet-20241022": (3.00, 15.00),
     "claude-3-5-haiku-20241022": (0.80, 4.00),
     "claude-3-opus-20240229": (15.00, 75.00),
-    # Google Gemini 3
-    "gemini-3-pro": (1.25, 5.00),
-    "gemini-3-flash": (0.075, 0.30),
-    # Google Gemini legacy
-    "gemini-2.5-pro": (1.25, 5.00),
-    "gemini-2.5-flash": (0.075, 0.30),
-    "gemini-pro": (0.50, 1.50),
 }
 
 
@@ -127,9 +101,10 @@ class BudgetTracker:
     """Tracks token usage and costs across the run.
 
     Tracks by:
-    - Provider (openai, anthropic, gemini)
+    - Provider (anthropic)
     - Agent
     - Phase
+    - Model
     """
 
     budget_limit: float
@@ -161,8 +136,8 @@ class BudgetTracker:
         """Record token usage and calculate cost.
 
         Args:
-            provider: LLM provider (openai, anthropic, gemini).
-            model: Model name/ID.
+            provider: LLM provider (anthropic).
+            model: Model name/ID (e.g., claude-opus-4-5-20251101).
             input_tokens: Number of input tokens.
             output_tokens: Number of output tokens.
             agent: Agent name that made the call.

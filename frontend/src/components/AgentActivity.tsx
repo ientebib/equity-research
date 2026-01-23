@@ -29,14 +29,16 @@ interface AgentActivityProps {
 const agentIcons: Record<string, typeof Bot> = {
   'DataOrchestrator': Cpu,
   'DiscoveryAgent': Sparkles,
-  'ExternalDiscoveryAgent': Sparkles,
+  'AnthropicDiscoveryAgent': Sparkles,
   'VerticalAnalystAgent': Brain,
   'SynthesizerAgent': Brain,
   'JudgeAgent': Bot,
+  'IntegratorAgent': Bot,
+  'VerificationAgent': Bot,
   'Pipeline': Bot,
   'Claude Opus': Brain,
-  'GPT-5.2': Cpu,
-  'Gemini Deep Research': Sparkles,
+  'Claude Sonnet': Brain,
+  'Claude Haiku': Sparkles,
 };
 
 const stageColors: Record<number, string> = {

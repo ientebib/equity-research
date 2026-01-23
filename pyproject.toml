@@ -36,9 +36,8 @@ dependencies = [
     "lxml>=5.0",
     "typer>=0.9",
     "rich>=13.0",
-    "openai>=1.0",
     "anthropic>=0.18",
-    "google-genai>=1.0",
+    "claude-agent-sdk>=0.1",
     "uuid6>=2024.1",
 ]
 
@@ -106,7 +105,7 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = [
     "yfinance.*",
-    "google.genai.*",
+    "claude_agent_sdk.*",
 ]
 ignore_missing_imports = true
 

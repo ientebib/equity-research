@@ -17,25 +17,27 @@
 | IntegratorAgent | ✅ | `...ebi/equity-research/src/er/agents/integrator.py` |  |
 | VerifiedResearchPackage | ✅ | `/Users/isaacentebi/equity-research/src/er/types.py` |  |
 | CrossVerticalMap | ✅ | `/Users/isaacentebi/equity-research/src/er/types.py` |  |
-| Pipeline Wiring | ✅ | `src/er/coordinator/pipeline.py` | All pipeline stages wired correctly |
+| Pipeline Wiring | ✅ | `src/er/coordinator/anthropic_sdk_agent.py` | Anthropic-only pipeline (pipeline.py deprecated) |
 | Citation Support | ✅ | `synthesizer.py, judge.py` | Both synthesizer and judge accept verified_package |
 
 ## Architecture Overview
 
+**Note:** This codebase is Anthropic-only. All agents use Claude models (Opus 4.5, Sonnet 4.5, Haiku).
+
 ```
-Stage 1: Data Collection
+Stage 1: Data Collection (Python/FMP)
     ↓
-Stage 2: Discovery (ThreadBriefs)
+Stage 2: Discovery (Claude Sonnet - ThreadBriefs)
     ↓
-Stage 3: Deep Research (VerticalDossiers + Facts[])
+Stage 3: Deep Research (Claude Sonnet - VerticalDossiers + Facts[])
     ↓
-Stage 3.5: Verification (VerifiedResearchPackage)
+Stage 3.5: Verification (Claude Sonnet - VerifiedResearchPackage)
     ↓
-Stage 3.75: Integration (CrossVerticalMap)
+Stage 3.75: Integration (Claude Sonnet - CrossVerticalMap)
     ↓
-Stage 4: Synthesis (with citations)
+Stage 4: Synthesis (Claude Opus - with extended thinking)
     ↓
-Stage 5: Judge (checks citations)
+Stage 5: Judge (Claude Opus - reviews and scores)
     ↓
-Stage 6: Revision
+Stage 6: Revision (Claude Opus - final polish)
 ```

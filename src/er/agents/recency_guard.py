@@ -12,8 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
-from er.llm.router import AgentRole
-from er.retrieval.service import WebResearchService
+from er.llm.base import LLMRequest
 from er.types import (
     CompanyContext,
     CoverageScorecard,
@@ -48,7 +47,7 @@ class RecencyGuardAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
-        self._web_research_service: WebResearchService | None = None
+        self._web_research_service: Any = None  # TODO: Refactor for Anthropic-only
 
     @property
     def name(self) -> str:
@@ -189,15 +188,17 @@ class RecencyGuardAgent(Agent):
 
         return output
 
-    async def _get_web_research_service(self) -> WebResearchService:
-        """Get or create WebResearchService."""
-        if self._web_research_service is None:
-            self._web_research_service = WebResearchService(
-                llm_router=self.llm_router,
-                evidence_store=self.evidence_store,
-                workspace_store=self.workspace_store,
-            )
-        return self._web_research_service
+    async def _get_web_research_service(self) -> Any:
+        """Get or create WebResearchService.
+
+        TODO: Refactor to use Anthropic-only retrieval stack.
+        """
+        # Temporarily disabled during Anthropic-only migration
+        # Will be re-enabled once retrieval stack is updated
+        raise NotImplementedError(
+            "WebResearchService needs refactoring for Anthropic-only stack. "
+            "Use discovery_anthropic.py for web research instead."
+        )
 
     async def _generate_outdated_prior_hypotheses(
         self,
@@ -248,14 +249,15 @@ Example: ["hypothesis 1", "hypothesis 2", ...]
 Output ONLY valid JSON."""
 
         try:
-            response = await self.llm_router.call(
-                role=AgentRole.WORKHORSE,  # Use cheap model
+            # Use Anthropic Haiku for fast/cheap hypothesis generation
+            request = LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
+                model="claude-3-5-haiku-20241022",
                 max_tokens=800,
-                response_format={"type": "json_object"},
             )
+            response = await self.anthropic_client.complete(request)
 
-            content = response.get("content", "")
+            content = response.content
             # Parse JSON
             import json
 

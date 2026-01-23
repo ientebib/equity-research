@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
-from er.llm.router import AgentRole
 from er.types import (
     ClaimGraph,
     CompanyContext,
@@ -349,9 +348,40 @@ class VerificationAgent(Agent):
                 actual_revenue = latest_quarter.get("revenue")
                 if actual_revenue:
                     ground_truth_source = "income_statement_quarterly"
-                    # Simple presence check - revenue exists
-                    status = VerificationStatus.VERIFIED
-                    verification_notes = f"Revenue data present in ground truth: ${actual_revenue:,.0f}"
+
+                    # Extract claimed revenue from statement and compare
+                    claimed_revenue = None
+                    for num_str in numbers_in_fact:
+                        try:
+                            num = float(num_str.replace(",", ""))
+                            # Handle B/M/K suffixes in original statement
+                            if "billion" in statement.lower() or num_str.endswith("B"):
+                                num *= 1e9
+                            elif "million" in statement.lower() or num_str.endswith("M"):
+                                num *= 1e6
+                            elif "thousand" in statement.lower() or num_str.endswith("K"):
+                                num *= 1e3
+                            # Only consider numbers that could reasonably be revenue
+                            if num > 1e6:  # At least $1M to be considered revenue
+                                claimed_revenue = num
+                                break
+                        except ValueError:
+                            continue
+
+                    if claimed_revenue:
+                        # Compare claimed vs actual with 10% tolerance
+                        tolerance = 0.10
+                        if abs(claimed_revenue - actual_revenue) / actual_revenue <= tolerance:
+                            status = VerificationStatus.VERIFIED
+                            verification_notes = f"Revenue verified: ${actual_revenue:,.0f} (claimed: ${claimed_revenue:,.0f}, within {tolerance*100:.0f}% tolerance)"
+                        else:
+                            status = VerificationStatus.CONTRADICTED
+                            pct_diff = ((claimed_revenue - actual_revenue) / actual_revenue) * 100
+                            verification_notes = f"Revenue CONTRADICTS ground truth: actual ${actual_revenue:,.0f} vs claimed ${claimed_revenue:,.0f} ({pct_diff:+.1f}% difference)"
+                    else:
+                        # No specific number claimed, just a general revenue statement
+                        status = VerificationStatus.VERIFIED
+                        verification_notes = f"Revenue data present in ground truth: ${actual_revenue:,.0f}"
 
             # Check growth rate
             if "growth" in statement or "yoy" in statement.lower():

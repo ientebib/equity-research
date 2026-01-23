@@ -16,7 +16,7 @@ const DEFAULT_STAGES: Stage[] = [
   { id: 3, name: 'Deep Research', shortName: 'DEEP', status: 'pending' },
   { id: 3.5, name: 'Verification', shortName: 'VRFY', status: 'pending' },
   { id: 3.75, name: 'Integration', shortName: 'INTG', status: 'pending' },
-  { id: 4, name: 'Dual Synthesis', shortName: 'SYNTH', status: 'pending' },
+  { id: 4, name: 'Synthesis', shortName: 'SYNTH', status: 'pending' },
   { id: 5, name: 'Editorial Review', shortName: 'EDIT', status: 'pending' },
   { id: 6, name: 'Final Report', shortName: 'FINAL', status: 'pending' },
 ];
@@ -25,8 +25,7 @@ interface ResearchStore {
   // Current run state
   run: RunState | null;
   discovery: DiscoveryOutput | null;
-  claudeSynthesis: SynthesisOutput | null;
-  gptSynthesis: SynthesisOutput | null;
+  synthesis: SynthesisOutput | null;  // Claude-only synthesis
   editorialFeedback: EditorialFeedback | null;
   finalReport: string | null;
 
@@ -42,8 +41,7 @@ interface ResearchStore {
   updateStage: (stageId: number, update: Partial<Stage>) => void;
   updateCost: (spent: number) => void;
   setDiscovery: (discovery: DiscoveryOutput) => void;
-  setClaudeSynthesis: (synthesis: SynthesisOutput) => void;
-  setGptSynthesis: (synthesis: SynthesisOutput) => void;
+  setSynthesis: (synthesis: SynthesisOutput) => void;
   setEditorialFeedback: (feedback: EditorialFeedback) => void;
   setFinalReport: (report: string) => void;
   completeRun: (verdict: CompletedRun['verdict']) => void;
@@ -59,8 +57,7 @@ export const useResearchStore = create<ResearchStore>()(
       // Initial state
       run: null,
       discovery: null,
-      claudeSynthesis: null,
-      gptSynthesis: null,
+      synthesis: null,
       editorialFeedback: null,
       finalReport: null,
       completedRuns: [],
@@ -82,8 +79,7 @@ export const useResearchStore = create<ResearchStore>()(
             currentStage: 1,
           },
           discovery: null,
-          claudeSynthesis: null,
-          gptSynthesis: null,
+          synthesis: null,
           editorialFeedback: null,
           finalReport: null,
           selectedTab: 'pipeline',
@@ -112,8 +108,7 @@ export const useResearchStore = create<ResearchStore>()(
       },
 
       setDiscovery: (discovery) => set({ discovery }),
-      setClaudeSynthesis: (synthesis) => set({ claudeSynthesis: synthesis }),
-      setGptSynthesis: (synthesis) => set({ gptSynthesis: synthesis }),
+      setSynthesis: (synthesis) => set({ synthesis }),
       setEditorialFeedback: (feedback) => set({ editorialFeedback: feedback }),
       setFinalReport: (report) => set({ finalReport: report }),
 
@@ -164,8 +159,7 @@ export const useResearchStore = create<ResearchStore>()(
       resetRun: () => set({
         run: null,
         discovery: null,
-        claudeSynthesis: null,
-        gptSynthesis: null,
+        synthesis: null,
         editorialFeedback: null,
         finalReport: null,
         selectedTab: 'pipeline',
@@ -188,8 +182,7 @@ export const useResearchStore = create<ResearchStore>()(
         completedRuns: state.completedRuns,
         run: state.run?.status === 'running' ? state.run : null,
         discovery: state.run?.status === 'running' ? state.discovery : null,
-        claudeSynthesis: state.run?.status === 'running' ? state.claudeSynthesis : null,
-        gptSynthesis: state.run?.status === 'running' ? state.gptSynthesis : null,
+        synthesis: state.run?.status === 'running' ? state.synthesis : null,
         finalReport: state.run?.status === 'running' ? state.finalReport : null,
       }),
     }

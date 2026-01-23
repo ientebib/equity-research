@@ -1,23 +1,23 @@
 """
 Judge Agent (Stage 5) - Editorial Review with Feedback Loop.
 
-The Judge compares both synthesis reports (Claude and GPT), identifies:
-1. Which synthesis is stronger
-2. What's better in the other synthesis that should be incorporated
-3. What errors or gaps need fixing
+The Judge reviews the synthesis report and identifies:
+1. Quality assessment (thesis clarity, evidence usage, risk analysis)
+2. Errors or contradictions with ground truth data
+3. Gaps that need addressing
+4. Specific revision instructions
 
 Instead of writing the final report itself, the Judge sends feedback
-to the chosen Synthesizer, which revises its report. This preserves
-the Synthesizer's chain of reasoning while incorporating the best
-of both worlds.
+to the Synthesizer, which revises its report. This preserves
+the Synthesizer's chain of reasoning while incorporating improvements.
 
 Flow:
-1. Judge reviews both full reports
-2. Judge picks preferred synthesis + generates revision feedback
+1. Judge reviews the full synthesis report
+2. Judge generates revision feedback
 3. Feedback sent back to Synthesizer
 4. Synthesizer produces revised final report
 
-Model: Claude Opus 4.5 (extended thinking, budget_tokens: 20000)
+Model: Claude Opus 4.5 (extended thinking)
 """
 
 from __future__ import annotations
@@ -50,232 +50,112 @@ JUDGE_PROMPT = """You are the Editorial Judge for an institutional equity resear
 
 ## YOUR ROLE
 
-You have received TWO full equity research reports (from Claude and GPT) analyzing the same company.
+You have received an equity research report analyzing {company_name} ({ticker}).
 Your job is NOT to write the final report yourself. Instead, you will:
 
-1. Read both full reports carefully
-2. Decide which report is STRONGER overall
-3. Identify what the OTHER report does BETTER that should be incorporated
-4. Identify any ERRORS or GAPS in the chosen report
-5. Generate SPECIFIC FEEDBACK for the chosen Synthesizer to revise its report
+1. Read the full report carefully
+2. Assess the quality of thesis, evidence usage, and risk analysis
+3. Identify any ERRORS or factual contradictions with ground truth data
+4. Identify any GAPS that should be addressed
+5. Generate SPECIFIC FEEDBACK for the Synthesizer to revise its report
 
 The final output will be the SYNTHESIZER'S revised report, not yours.
 You are an editor, not an author.
 
-## CLAUDE SYNTHESIS REPORT
+## SYNTHESIS REPORT
 
-{claude_synthesis}
-
-## GPT SYNTHESIS REPORT
-
-{gpt_synthesis}
+{synthesis_report}
 
 ## KEY FINANCIAL DATA (For Fact-Checking Claims)
 
-Use this actual data to validate numerical claims in both reports:
+Use this actual data to validate numerical claims in the report:
 
 {key_metrics}
 
 ## VERIFIED FACTS (For Citation Checking)
 
-The research team verified these facts. Check if reports cite them properly:
+These facts were verified against ground truth:
 
-{verified_facts_section}
+{verified_facts_summary}
 
-## YOUR ANALYSIS PROCESS
+## CRITICAL DATA GAPS
 
-### Step 1: Overall Assessment
-Read both reports in full. Consider:
-- Depth of analysis
-- Quality of reasoning
-- Use of evidence
-- Clarity of investment thesis
-- Completeness of risk assessment
-- Internal consistency
+These data points were requested but not found:
+{data_gaps}
 
-### Step 2: Pick the Stronger Report
-Which report is better overall? This will be the BASE for the final report.
-The chosen Synthesizer will revise it based on your feedback.
+## EVALUATION CRITERIA
 
-### Step 3: Identify What the Other Report Does Better
-The "losing" report may still have strengths worth incorporating:
-- Better analysis of a specific segment?
-- Identified a risk the other missed?
-- Clearer explanation of something?
-- More specific metrics or evidence?
+### 1. Thesis Quality (0-10)
+- Is the investment view (BUY/HOLD/SELL) clearly stated?
+- Is conviction level appropriate given evidence?
+- Is the thesis summary compelling and specific?
 
-### Step 4: Identify Errors and Gaps
-In the CHOSEN report, what needs fixing?
-- Factual errors
-- Logical inconsistencies
-- Missing considerations
-- Overconfident claims
-- Unclear reasoning
+### 2. Evidence Usage (0-10)
+- Are claims supported by specific evidence?
+- Are sources properly cited?
+- Are numerical claims accurate vs ground truth?
 
-### Step 5: Generate Revision Feedback
-Write specific, actionable feedback for the Synthesizer.
-This is your main output - make it detailed and useful.
+### 3. Risk Analysis (0-10)
+- Are key risks identified?
+- Are risks quantified where possible?
+- Are mitigants discussed?
+
+### 4. Report Structure (0-10)
+- Is the report well-organized?
+- Is the executive summary clear?
+- Are sections appropriately detailed?
 
 ## OUTPUT FORMAT
 
-```json
+Return a JSON object with this exact structure:
 {{
-  "preferred_synthesis": "claude|gpt|reject_both",
-  "preference_reasoning": "2-3 sentences explaining why this report is stronger overall",
-  "rejection_reason": "Only if reject_both: Why both reports are unacceptable and what the re-synthesis should fix",
-
-  "overall_quality_assessment": {{
-    "claude_score": 0.0,
-    "gpt_score": 0.0,
-    "key_differentiators": ["What made the winner better"]
+  "quality_scores": {{
+    "thesis_quality": 0,
+    "evidence_usage": 0,
+    "risk_analysis": 0,
+    "report_structure": 0,
+    "overall_score": 0.0
   }},
-
-  "incorporate_from_other": [
-    {{
-      "section": "Which section of the other report has something better",
-      "what_to_incorporate": "QUOTE the specific passage or insight verbatim. Include the actual text so the Synthesizer can incorporate it directly without losing nuance.",
-      "why": "Why this improves the report",
-      "how_to_integrate": "Specific suggestion for where and how to add this"
-    }}
-  ],
-
   "errors_to_fix": [
     {{
-      "location": "Where in the report (section name or quote)",
-      "error": "What's wrong",
-      "correction": "What it should say or how to fix it"
+      "error_type": "factual|logical|citation|contradiction",
+      "description": "What's wrong",
+      "location": "Where in the report",
+      "correction": "How to fix it"
     }}
   ],
-
   "gaps_to_address": [
     {{
-      "missing": "What's missing from the report",
-      "why_important": "Why this matters for the investment thesis",
-      "suggestion": "How to address it"
+      "gap_type": "missing_analysis|incomplete_section|data_gap",
+      "description": "What's missing",
+      "priority": "high|medium|low",
+      "suggested_content": "What should be added"
     }}
   ],
-
-  "revision_instructions": "
-    Detailed instructions for the Synthesizer to revise its report.
-    Be specific:
-    - 'In the Executive Summary, add...'
-    - 'The Cloud segment analysis should incorporate...'
-    - 'Strengthen the bear case by...'
-    - 'The risk section is missing...'
-
-    This should be 3-5 paragraphs of actionable feedback.
-  ",
-
-  "confidence_adjustment": {{
-    "current_confidence": 0.0,
-    "recommended_confidence": 0.0,
-    "reasoning": "Why adjust confidence (or why keep it)"
-  }},
-
-  "meta": {{
-    "analysis_quality": "high|medium|low",
-    "key_strengths": ["What both reports did well"],
-    "key_weaknesses": ["What both reports could improve"]
-  }}
+  "revision_instructions": "Detailed instructions for the Synthesizer to revise the report. Be specific - quote sections that need changes and explain exactly what to modify."
 }}
-```
 
-## HARD RULES
+## IMPORTANT
 
-1. **YOU ARE AN EDITOR, NOT AN AUTHOR** - Your job is to guide the Synthesizer, not write the final report yourself.
+1. **GROUND TRUTH WINS** - If the report contradicts the financial data provided above, that's an error.
+2. **BE SPECIFIC** - Not "improve the risk section" but "add analysis of regulatory risk after current risk #3."
+3. **QUOTE SECTIONS** - When referencing parts to change, quote them so the Synthesizer knows exactly where.
+4. **PRESERVE GOOD PARTS** - Focus feedback on what needs improving, not rewriting good sections.
+5. **CONSTRUCTIVE CRITICISM** - Provide actionable feedback, not just complaints.
 
-2. **REJECT_BOTH OPTION** - Use "reject_both" ONLY when BOTH reports have fundamental flaws that can't be fixed with simple revisions:
-   - Factually incorrect core claims (check against KEY FINANCIAL DATA above)
-   - Internally contradictory investment thesis
-   - Missing critical analysis (no risk assessment, no valuation, no thesis)
-   - Both scores below 0.5
-   When rejecting both, provide clear `rejection_reason` explaining what the re-synthesis must fix.
-
-3. **QUOTE, DON'T SUMMARIZE** - When extracting insights from the other report, QUOTE the actual text verbatim.
-   The Synthesizer needs the exact language to incorporate the insight without losing nuance.
-   BAD: "GPT had a good point about regulatory risk"
-   GOOD: "GPT wrote: 'The DOJ antitrust case represents an underappreciated tail risk. If the court mandates structural remedies, the advertising business could face...' - incorporate this in your Risk Assessment section."
-
-4. **BE SPECIFIC** - Not "improve the risk section" but "add the regulatory risk analysis from GPT's report (quoted above) after your current risk #3."
-
-5. **TRANSFER BRILLIANCE** - Both reports may have unique brilliant insights. Your job is to ensure the winner's report includes the best of BOTH. Don't let good insights die with the losing report.
-
-6. **PRIORITIZE** - Focus on what matters most. 3-5 key improvements, not 50 minor edits.
-
-7. **PRESERVE THE THESIS** - Don't ask the Synthesizer to flip their investment view unless there's a critical error. The Synthesizer developed their thesis through reasoning - respect that.
-
-8. **ACKNOWLEDGE UNCERTAINTY** - If evidence is thin, recommend lowering confidence rather than fabricating certainty.
-
-9. **THINK ADVERSARIALLY** - What would a skeptic challenge? Ensure the final report addresses likely pushback.
-
-Output ONLY the JSON. No preamble."""
-
-
-# Revision prompt for the Synthesizer to incorporate Judge feedback
-REVISION_PROMPT = """You are revising your equity research report based on editorial feedback.
-
-## TODAY'S DATE: {date}
-## COMPANY: {ticker}
-
-## YOUR ORIGINAL REPORT
-
-{original_report}
-
-## EDITORIAL FEEDBACK FROM JUDGE
-
-The Judge reviewed both your report and an alternative synthesis. They have selected YOUR report
-as the stronger one, but have provided feedback to make it even better.
-
-### What to incorporate from the other report:
-{incorporate_from_other}
-
-### Errors to fix:
-{errors_to_fix}
-
-### Gaps to address:
-{gaps_to_address}
-
-### Detailed revision instructions:
-{revision_instructions}
-
-### Confidence adjustment:
-{confidence_adjustment}
-
-## YOUR TASK
-
-Revise your report incorporating the Judge's feedback. You should:
-
-1. **PRESERVE your core thesis and reasoning** - The Judge selected your report because your analysis was strong. Don't abandon your reasoning.
-
-2. **INCORPORATE the specific improvements** - Add the insights, fix the errors, address the gaps.
-
-3. **MAINTAIN your voice and structure** - This is still YOUR report. Don't rewrite it from scratch.
-
-4. **UPDATE the JSON metadata** at the end if the feedback affects investment view, conviction, or confidence.
-
-## OUTPUT
-
-Output your REVISED full report in the same format as before:
-- Full prose research report (main content)
-- JSON metadata block at the end
-
-The report should be improved but recognizably yours."""
+Output ONLY valid JSON."""
 
 
 class JudgeAgent(Agent):
-    """Stage 5: Editorial Judge with Feedback Loop.
+    """Stage 5: Judge Agent (Editorial Review).
 
-    Responsible for:
-    1. Comparing Claude and GPT synthesis REPORTS (full prose)
-    2. Selecting the stronger report
-    3. Identifying improvements from the other report to incorporate
-    4. Generating specific revision feedback
-    5. Sending feedback back to the chosen Synthesizer
+    Responsibilities:
+    1. Reviewing synthesis report quality
+    2. Checking factual accuracy against ground truth
+    3. Identifying errors and gaps
+    4. Generating specific revision feedback for Synthesizer
 
-    The final output is the SYNTHESIZER'S revised report, not the Judge's.
-    This preserves the chain of reasoning while getting best of both worlds.
-
-    Uses Claude Opus 4.5 with extended thinking (budget_tokens: 20000).
+    Uses Claude Opus 4.5 with extended thinking for nuanced evaluation.
     """
 
     def __init__(self, context: AgentContext) -> None:
@@ -285,7 +165,6 @@ class JudgeAgent(Agent):
             context: Agent context with shared resources.
         """
         super().__init__(context)
-        self._anthropic_client: AnthropicClient | None = None
 
     @property
     def name(self) -> str:
@@ -293,94 +172,65 @@ class JudgeAgent(Agent):
 
     @property
     def role(self) -> str:
-        return "Editorial review of syntheses with feedback for revision"
-
-    async def _get_anthropic_client(self) -> AnthropicClient:
-        """Get or create Anthropic client."""
-        if self._anthropic_client is None:
-            self._anthropic_client = AnthropicClient(
-                api_key=self.settings.ANTHROPIC_API_KEY,
-            )
-        return self._anthropic_client
+        return "Editorial review and feedback generation"
 
     async def run(
         self,
         run_state: RunState,
         company_context: CompanyContext,
-        claude_synthesis: SynthesisOutput,
-        gpt_synthesis: SynthesisOutput,
+        synthesis: SynthesisOutput,
         verified_package: VerifiedResearchPackage | None = None,
-        **kwargs: Any,
     ) -> EditorialFeedback:
-        """Execute Stage 5: Editorial Review.
-
-        Compares both synthesis reports and generates editorial feedback
-        for the winning Synthesizer to revise their report.
+        """Run editorial review of synthesis report.
 
         Args:
             run_state: Current run state.
-            company_context: CompanyContext from Stage 1.
-            claude_synthesis: Synthesis from Claude (Stage 4) with full_report.
-            gpt_synthesis: Synthesis from GPT (Stage 4) with full_report.
-            verified_package: Optional VerifiedResearchPackage for citation checking.
+            company_context: Company financial data (ground truth).
+            synthesis: Synthesis report to review.
+            verified_package: Optional verification results.
 
         Returns:
             EditorialFeedback with revision instructions.
         """
+        run_state.phase = Phase.EDITORIAL_REVIEW
+        ticker = run_state.ticker
+        company_name = company_context.company_name
+
         self.log_info(
             "Starting editorial review",
-            ticker=run_state.ticker,
-            claude_view=claude_synthesis.investment_view,
-            claude_report_len=len(claude_synthesis.full_report),
-            gpt_view=gpt_synthesis.investment_view,
-            gpt_report_len=len(gpt_synthesis.full_report),
-            has_verified_package=verified_package is not None,
+            ticker=ticker,
+            synthesis_view=synthesis.investment_view,
+            synthesis_len=len(synthesis.full_report),
         )
 
-        run_state.phase = Phase.DELIBERATE
-
-        # Build the prompt with FULL REPORTS (not JSON summaries)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-        # Get key metrics for fact-checking claims
-        key_metrics = company_context.for_judge()
-
-        # Format verified facts for citation checking
-        verified_facts_section = self._format_verified_facts_for_judge(verified_package)
+        # Build the prompt
+        key_metrics = self._build_key_metrics(company_context)
+        verified_facts_summary = self._build_verified_facts_summary(verified_package)
+        data_gaps = self._build_data_gaps(verified_package)
 
         prompt = JUDGE_PROMPT.format(
-            date=today,
-            claude_synthesis=claude_synthesis.full_report,
-            gpt_synthesis=gpt_synthesis.full_report,
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            ticker=ticker,
+            company_name=company_name,
+            synthesis_report=synthesis.full_report,
             key_metrics=key_metrics,
-            verified_facts_section=verified_facts_section,
+            verified_facts_summary=verified_facts_summary,
+            data_gaps=data_gaps,
         )
 
-        # Get Anthropic client
-        anthropic = await self._get_anthropic_client()
-
-        # Run editorial review with extended thinking
+        # Call Opus with extended thinking
         request = LLMRequest(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a senior equity research editor reviewing two synthesis reports. Your job is to pick the stronger one and provide specific feedback for revision.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role": "user", "content": prompt}],
             model="claude-opus-4-5-20251101",
-            # Note: max_tokens is computed by complete_with_thinking from budget + expected output
+            max_tokens=8000,
         )
 
-        self.log_info("Calling Claude for editorial review...")
-
-        response = await anthropic.complete_with_thinking(
+        response = await self.anthropic_client.complete_with_extended_thinking(
             request,
-            budget_tokens=16000,  # Good thinking budget for comparative analysis
-            expected_output_tokens=10000,  # Editorial feedback is shorter than full reports
+            budget_tokens=15000,
         )
 
-        # Record cost
+        # Record budget usage
         if self.budget_tracker:
             self.budget_tracker.record_usage(
                 provider="anthropic",
@@ -388,197 +238,163 @@ class JudgeAgent(Agent):
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
                 agent=self.name,
-                phase="judge_editorial",
+                phase="editorial_review",
+            )
+
+        # Parse the response
+        feedback = self._parse_response(
+            response.content,
+            ticker,
+            synthesis,
+        )
+
+        # Store in WorkspaceStore
+        if self.workspace_store:
+            self.workspace_store.put_artifact(
+                artifact_type="editorial_feedback",
+                producer=self.name,
+                json_obj=feedback.to_dict(),
+                summary=f"Editorial review: score={feedback.claude_score:.1f}, errors={len(feedback.errors_to_fix)}, gaps={len(feedback.gaps_to_address)}",
+                evidence_ids=[],
             )
 
         self.log_info(
-            "Received editorial response",
-            response_len=len(response.content),
-            thinking_tokens=response.metadata.get("thinking_tokens") if response.metadata else 0,
-        )
-
-        # Parse the editorial feedback
-        feedback = self._parse_editorial_feedback(response.content)
-
-        # Update run state
-        run_state.final_verdict = {
-            "preferred_synthesis": feedback.preferred_synthesis,
-            "claude_score": feedback.claude_score,
-            "gpt_score": feedback.gpt_score,
-            "insights_to_incorporate": len(feedback.incorporate_from_other),
-            "errors_to_fix": len(feedback.errors_to_fix),
-            "gaps_to_address": len(feedback.gaps_to_address),
-        }
-
-        self.log_info(
-            "Completed editorial review",
-            ticker=run_state.ticker,
-            preferred=feedback.preferred_synthesis,
-            claude_score=feedback.claude_score,
-            gpt_score=feedback.gpt_score,
-            insights_count=len(feedback.incorporate_from_other),
+            "Editorial review complete",
+            ticker=ticker,
+            overall_score=feedback.claude_score,
             errors_count=len(feedback.errors_to_fix),
+            gaps_count=len(feedback.gaps_to_address),
         )
 
         return feedback
 
-    def _format_verified_facts_for_judge(
-        self,
-        package: VerifiedResearchPackage | None,
-    ) -> str:
-        """Format verified facts for the Judge to check citations.
-
-        Args:
-            package: VerifiedResearchPackage from verification stage.
-
-        Returns:
-            Formatted string for the Judge prompt.
-        """
-        if not package or not package.all_verified_facts:
-            return "(No verified facts available for citation checking)"
-
+    def _build_key_metrics(self, company_context: CompanyContext) -> str:
+        """Build key financial metrics summary for fact-checking."""
         lines = []
 
-        # Verified facts that should be cited
-        verified = [
-            vf for vf in package.all_verified_facts
-            if vf.status == VerificationStatus.VERIFIED
-        ]
-        if verified:
-            lines.append("### Facts that SHOULD be cited:")
-            for vf in verified[:10]:  # Top 10
-                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
+        # Latest quarterly income
+        income_stmt = company_context.income_statement_quarterly
+        if income_stmt:
+            latest = income_stmt[0]
+            lines.append(f"Latest Quarter Revenue: ${latest.get('revenue', 0):,.0f}")
+            lines.append(f"Operating Income: ${latest.get('operatingIncome', 0):,.0f}")
+            lines.append(f"Net Income: ${latest.get('netIncome', 0):,.0f}")
 
-        # Contradicted facts that should NOT be used
-        contradicted = [
-            vf for vf in package.all_verified_facts
-            if vf.status == VerificationStatus.CONTRADICTED
-        ]
-        if contradicted:
-            lines.append("\n### Facts that should NOT be used (contradicted):")
-            for vf in contradicted:
-                lines.append(f"- [{vf.original_fact.evidence_id}] {vf.original_fact.statement}")
-                lines.append(f"  CONTRADICTION: {vf.verification_notes}")
+        # YoY growth if available
+        if income_stmt and len(income_stmt) >= 5:
+            current_rev = income_stmt[0].get("revenue", 0)
+            year_ago_rev = income_stmt[4].get("revenue", 0)
+            if year_ago_rev > 0:
+                yoy_growth = ((current_rev / year_ago_rev) - 1) * 100
+                lines.append(f"YoY Revenue Growth: {yoy_growth:.1f}%")
 
-        # Critical issues to check for
+        # Balance sheet
+        balance_sheet = company_context.balance_sheet_quarterly
+        if balance_sheet:
+            latest = balance_sheet[0]
+            lines.append(f"Total Assets: ${latest.get('totalAssets', 0):,.0f}")
+            lines.append(f"Total Debt: ${latest.get('totalDebt', 0):,.0f}")
+            lines.append(f"Cash: ${latest.get('cashAndCashEquivalents', 0):,.0f}")
+
+        return "\n".join(lines) if lines else "(No financial data available)"
+
+    def _build_verified_facts_summary(self, package: VerifiedResearchPackage | None) -> str:
+        """Build summary of verified facts."""
+        if not package:
+            return "(No verification data)"
+
+        lines = [
+            f"Total facts verified: {package.verified_count}/{package.total_facts}",
+            f"Contradicted facts: {package.contradicted_count}",
+            f"Unverifiable facts: {package.unverifiable_count}",
+        ]
+
+        # List critical issues
         if package.critical_issues:
-            lines.append("\n### Critical issues to verify addressed:")
+            lines.append("\nCritical issues found:")
             for issue in package.critical_issues[:5]:
                 lines.append(f"- {issue}")
 
-        # Citation check instructions
-        lines.append("\n### Citation Check:")
-        lines.append("- Reports SHOULD cite evidence IDs in brackets [ev_xxxx]")
-        lines.append("- Flag as GAP if major claims lack citations")
-        lines.append("- Flag as ERROR if contradicted facts are used")
-
         return "\n".join(lines)
 
-    def _parse_editorial_feedback(self, content: str) -> EditorialFeedback:
-        """Parse the LLM response into EditorialFeedback."""
+    def _build_data_gaps(self, package: VerifiedResearchPackage | None) -> str:
+        """Build list of data gaps."""
+        if not package:
+            return "(No data gap information)"
+
+        # Collect gaps from all verification results
+        gaps = []
+        for vr in package.verification_results:
+            for fact in vr.facts:
+                if fact.verification_status == VerificationStatus.UNVERIFIABLE:
+                    gaps.append(f"- {fact.original_statement[:100]}...")
+
+        return "\n".join(gaps[:10]) if gaps else "(No data gaps identified)"
+
+    def _parse_response(
+        self,
+        content: str,
+        ticker: str,
+        synthesis: SynthesisOutput,
+    ) -> EditorialFeedback:
+        """Parse Judge response into EditorialFeedback."""
         try:
-            # Find JSON block
+            # Extract JSON
             if "```json" in content:
-                json_start = content.find("```json") + 7
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
+                start = content.find("```json") + 7
+                end = content.find("```", start)
+                content = content[start:end]
             elif "```" in content:
-                json_start = content.find("```") + 3
-                json_end = content.find("```", json_start)
-                json_str = content[json_start:json_end].strip()
-            else:
-                # Try to find JSON object directly
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                json_str = content[start:end]
+                start = content.find("```") + 3
+                end = content.find("```", start)
+                content = content[start:end]
 
-            data = json.loads(json_str)
+            data = json.loads(content)
 
-        except (json.JSONDecodeError, ValueError) as e:
-            self.log_warning(f"Failed to parse editorial feedback JSON: {e}")
-            # Return minimal feedback
+            # Parse quality scores
+            quality = data.get("quality_scores", {})
+            overall_score = quality.get("overall_score", 0.5)
+
+            # Parse errors
+            errors = []
+            for err in data.get("errors_to_fix", []):
+                errors.append(ErrorToFix(
+                    error_type=err.get("error_type", "unknown"),
+                    description=err.get("description", ""),
+                    location=err.get("location", ""),
+                    correction=err.get("correction", ""),
+                ))
+
+            # Parse gaps
+            gaps = []
+            for gap in data.get("gaps_to_address", []):
+                gaps.append(GapToAddress(
+                    gap_type=gap.get("gap_type", "unknown"),
+                    description=gap.get("description", ""),
+                    priority=gap.get("priority", "medium"),
+                    suggested_content=gap.get("suggested_content", ""),
+                ))
+
+            return EditorialFeedback(
+                preferred_synthesis="claude",  # Always Claude in Anthropic-only mode
+                claude_score=overall_score,
+                gpt_score=0.0,  # Not used in Anthropic-only mode
+                incorporate_from_other=[],  # Not applicable
+                errors_to_fix=errors,
+                gaps_to_address=gaps,
+                revision_instructions=data.get("revision_instructions", ""),
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        except Exception as e:
+            self.log_error("Failed to parse Judge response", error=str(e))
             return EditorialFeedback(
                 preferred_synthesis="claude",
-                preference_reasoning="Failed to parse response - defaulting to Claude",
                 claude_score=0.5,
-                gpt_score=0.5,
-                key_differentiators=["Parse error"],
+                gpt_score=0.0,
                 incorporate_from_other=[],
                 errors_to_fix=[],
                 gaps_to_address=[],
-                revision_instructions="Unable to parse editorial feedback. Review reports manually.",
-                current_confidence=0.5,
-                recommended_confidence=0.5,
-                confidence_reasoning="Parse error",
-                analysis_quality="low",
-                key_strengths=[],
-                key_weaknesses=["Failed to complete editorial review"],
+                revision_instructions="Unable to parse editorial feedback. Please review the synthesis manually.",
+                timestamp=datetime.now(timezone.utc),
             )
-
-        # Parse quality assessment
-        quality = data.get("overall_quality_assessment", {})
-
-        # Parse insights to incorporate
-        incorporate = []
-        for item in data.get("incorporate_from_other", []):
-            incorporate.append(
-                InsightToIncorporate(
-                    section=item.get("section", ""),
-                    what_to_incorporate=item.get("what_to_incorporate", ""),
-                    why=item.get("why", ""),
-                    how_to_integrate=item.get("how_to_integrate", ""),
-                )
-            )
-
-        # Parse errors to fix
-        errors = []
-        for item in data.get("errors_to_fix", []):
-            errors.append(
-                ErrorToFix(
-                    location=item.get("location", ""),
-                    error=item.get("error", ""),
-                    correction=item.get("correction", ""),
-                )
-            )
-
-        # Parse gaps to address
-        gaps = []
-        for item in data.get("gaps_to_address", []):
-            gaps.append(
-                GapToAddress(
-                    missing=item.get("missing", ""),
-                    why_important=item.get("why_important", ""),
-                    suggestion=item.get("suggestion", ""),
-                )
-            )
-
-        # Parse confidence adjustment
-        conf = data.get("confidence_adjustment", {})
-
-        # Parse meta
-        meta = data.get("meta", {})
-
-        return EditorialFeedback(
-            preferred_synthesis=data.get("preferred_synthesis", "claude"),
-            preference_reasoning=data.get("preference_reasoning", ""),
-            rejection_reason=data.get("rejection_reason"),  # None if not reject_both
-            claude_score=quality.get("claude_score", 0.5),
-            gpt_score=quality.get("gpt_score", 0.5),
-            key_differentiators=quality.get("key_differentiators", []),
-            incorporate_from_other=incorporate,
-            errors_to_fix=errors,
-            gaps_to_address=gaps,
-            revision_instructions=data.get("revision_instructions", ""),
-            current_confidence=conf.get("current_confidence", 0.5),
-            recommended_confidence=conf.get("recommended_confidence", 0.5),
-            confidence_reasoning=conf.get("reasoning", ""),
-            analysis_quality=meta.get("analysis_quality", "medium"),
-            key_strengths=meta.get("key_strengths", []),
-            key_weaknesses=meta.get("key_weaknesses", []),
-        )
-
-    async def close(self) -> None:
-        """Close any open clients."""
-        if self._anthropic_client:
-            await self._anthropic_client.close()
-            self._anthropic_client = None

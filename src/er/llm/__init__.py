@@ -2,9 +2,8 @@
 LLM client package.
 
 This package provides a unified interface for LLM providers:
-- OpenAI (GPT-5.2 family)
-- Anthropic (Claude 4.5 family)
-- Google (Gemini 3 family)
+- Anthropic (Claude family) - primary provider
+- Claude Agent SDK - for multi-agent orchestration
 """
 
 from er.llm.base import (
@@ -16,17 +15,15 @@ from er.llm.base import (
     RateLimitError,
     ToolCall,
 )
-from er.llm.router import AgentRole, EscalationLevel, LLMRouter
+from er.llm.anthropic_client import AnthropicClient
 
 __all__ = [
-    "AgentRole",
+    "AnthropicClient",
     "BudgetExceededError",
-    "EscalationLevel",
     "LLMClient",
     "LLMError",
     "LLMRequest",
     "LLMResponse",
-    "LLMRouter",
     "RateLimitError",
     "ToolCall",
 ]

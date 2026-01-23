@@ -185,7 +185,7 @@ export function NewRunModal({ isOpen, onClose, onStart }: NewRunModalProps) {
                     <div>
                       <span className="text-sm">Deep Research</span>
                       <p className="text-xs text-[var(--kp-text-muted)]">
-                        Use Gemini Deep Research for verticals
+                        Use Claude subagents for deep vertical research
                       </p>
                     </div>
                   </label>

@@ -96,14 +96,13 @@ export interface SynthesisOutput {
   conviction: 'high' | 'medium' | 'low' | 'high-medium' | 'medium-low';
   overall_confidence: number;
   thesis_summary: string;
-  synthesizer_model: 'claude' | 'gpt';
+  synthesizer_model: 'claude';  // Anthropic-only
 }
 
 export interface EditorialFeedback {
-  preferred_synthesis: 'claude' | 'gpt';
+  preferred_synthesis: 'claude';  // Anthropic-only
   preference_reasoning: string;
   claude_score: number;
-  gpt_score: number;
   key_differentiators: string[];
   revision_instructions: string;
   recommended_confidence: number;

@@ -7,10 +7,12 @@ This module implements:
 
 Agent types implemented in separate modules:
 - data_orchestrator.py: DataOrchestratorAgent for Stage 1
-- discovery.py: DiscoveryAgent for Stage 2
-- vertical_analyst.py: VerticalAnalystAgent for Stage 3
-- synthesizer.py: SynthesizerAgent for Stage 4
-- judge.py: JudgeAgent for Stage 5
+- discovery_anthropic.py: AnthropicDiscoveryAgent for Stage 2
+- judge.py: JudgeAgent for editorial review
+- integrator.py: IntegratorAgent for cross-vertical analysis
+- verifier.py: VerificationAgent for fact-checking
+
+All agents use Anthropic Claude via the Agent SDK or direct client.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from er.budget import BudgetTracker
 from er.evidence.store import EvidenceStore
-from er.llm.router import LLMRouter
+from er.llm.anthropic_client import AnthropicClient
 from er.logging import get_logger
 from er.workspace.store import WorkspaceStore
 
@@ -40,7 +42,7 @@ class AgentContext:
     """
 
     settings: Settings
-    llm_router: LLMRouter
+    anthropic_client: AnthropicClient
     evidence_store: EvidenceStore
     budget_tracker: BudgetTracker
     workspace_store: WorkspaceStore | None = None
@@ -88,9 +90,9 @@ class Agent(ABC):
         ...
 
     @property
-    def llm_router(self) -> LLMRouter:
-        """Get the LLM router."""
-        return self.context.llm_router
+    def anthropic_client(self) -> AnthropicClient:
+        """Get the Anthropic client."""
+        return self.context.anthropic_client
 
     @property
     def evidence_store(self) -> EvidenceStore:

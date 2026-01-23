@@ -3,6 +3,8 @@ EvidenceCard generator - summarize web pages into bounded cards.
 
 EvidenceCards are bounded summaries (300-500 tokens) of web pages,
 stored in both EvidenceStore and WorkspaceStore for tracking.
+
+Uses Anthropic Claude for summarization.
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from er.evidence.store import EvidenceStore
-from er.llm.router import LLMRouter, AgentRole
+from er.llm.anthropic_client import AnthropicClient
+from er.llm.base import LLMRequest
 from er.logging import get_logger
 from er.retrieval.fetch import FetchResult
 from er.security.sanitizer import InputSanitizer, ThreatLevel
@@ -64,7 +67,7 @@ Evidence ID: {self.raw_evidence_id}
 class EvidenceCardGenerator:
     """Generates bounded EvidenceCards from web pages.
 
-    Uses a cheap model to summarize page content into structured cards.
+    Uses Claude Haiku for fast, cheap summarization of page content.
     """
 
     # Prompt for summarization
@@ -96,23 +99,23 @@ Return ONLY valid JSON."""
 
     def __init__(
         self,
-        llm_router: LLMRouter,
+        anthropic_client: AnthropicClient,
         evidence_store: EvidenceStore,
         workspace_store: WorkspaceStore | None = None,
-        model: str | None = None,
+        model: str = "claude-3-5-haiku-20241022",
     ) -> None:
         """Initialize the generator.
 
         Args:
-            llm_router: LLM router for API calls.
+            anthropic_client: Anthropic client for API calls.
             evidence_store: Store for raw evidence.
             workspace_store: Store for structured artifacts.
-            model: Model to use (defaults to cheap workhorse model).
+            model: Model to use (defaults to Haiku for speed/cost).
         """
-        self.llm_router = llm_router
+        self.anthropic_client = anthropic_client
         self.evidence_store = evidence_store
         self.workspace_store = workspace_store
-        self.model = model  # Will use default if None
+        self.model = model
 
     async def generate_card(
         self,
@@ -177,19 +180,29 @@ Return ONLY valid JSON."""
             prompt = f"Context: {query_context}\n\n{prompt}"
 
         try:
-            # Call LLM for summarization
-            response = await self.llm_router.call(
-                role=AgentRole.OUTPUT,  # Cheap model
+            # Call Claude for summarization
+            request = LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
+                model=self.model,
                 max_tokens=800,
-                response_format={"type": "json_object"},
             )
+            response = await self.anthropic_client.complete(request)
 
             # Parse response
-            content_str = response.get("content", "")
+            content_str = response.content
             if not content_str:
                 logger.warning("Empty response from summarization", url=fetch_result.url)
                 return None
+
+            # Extract JSON from response
+            if "```json" in content_str:
+                start = content_str.find("```json") + 7
+                end = content_str.find("```", start)
+                content_str = content_str[start:end].strip()
+            elif "```" in content_str:
+                start = content_str.find("```") + 3
+                end = content_str.find("```", start)
+                content_str = content_str[start:end].strip()
 
             data = json.loads(content_str)
 

@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 from er.agents.base import Agent, AgentContext
-from er.llm.router import AgentRole
+from er.llm.base import LLMRequest
 from er.types import (
     CrossVerticalInsight,
     CrossVerticalMap,
@@ -171,17 +171,28 @@ class IntegratorAgent(Agent):
             facts_summary=facts_summary,
         )
 
-        # Call LLM for pattern finding
-        response = await self.llm_router.call(
-            role=AgentRole.OUTPUT,  # Use cheap model
+        # Call Anthropic for pattern finding (use Haiku for speed)
+        request = LLMRequest(
             messages=[{"role": "user", "content": prompt}],
+            model="claude-3-5-haiku-20241022",
             max_tokens=2000,
-            response_format={"type": "json_object"},
         )
+        response = await self.anthropic_client.complete(request)
+
+        # Record budget usage
+        if self.budget_tracker:
+            self.budget_tracker.record_usage(
+                provider="anthropic",
+                model=response.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                agent=self.name,
+                phase="integration",
+            )
 
         # Parse response
         cross_map = self._parse_response(
-            response.get("content", ""),
+            response.content,
             run_state.ticker,
             verified_package.evidence_ids,
         )

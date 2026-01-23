@@ -952,7 +952,7 @@ class ResearchPipeline:
                     searches_already_done=searches_already_done_text,
                     relevant_threats=relevant_threats_text,
                 ),
-                tools=["WebSearch", "WebFetch"],
+                tools=["WebSearch"],  # Claude Agent SDK web search
             )
 
         # Run orchestrator with subagents

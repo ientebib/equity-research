@@ -1,6 +1,6 @@
 # Equity Research
 
-An AI-powered equity research platform that produces institutional-grade investment analysis using a multi-agent pipeline with Claude, GPT, and Gemini.
+An AI-powered equity research platform that produces institutional-grade investment analysis using a multi-agent pipeline powered by Claude (Anthropic).
 
 ## Overview
 
@@ -12,8 +12,8 @@ Stage 2: Discovery       → Internal analysis + external competitive intelligen
 Stage 3: Deep Research   → Vertical analysts for each business segment
 Stage 3.5: Verification  → Heuristic verification and fact ledger
 Stage 3.75: Integration  → Cross-vertical dynamics
-Stage 4: Dual Synthesis  → Claude + GPT syntheses
-Stage 5: Editorial       → Judge agent compares and selects best analysis
+Stage 4: Synthesis       → Claude synthesis with extended thinking
+Stage 5: Editorial       → Judge agent reviews and scores analysis
 Stage 6: Revision        → Final report with incorporated feedback
 Stage 7: Valuation       → DCF / reverse DCF artifacts (best-effort)
 ```
@@ -21,7 +21,7 @@ Stage 7: Valuation       → DCF / reverse DCF artifacts (best-effort)
 ## Features
 
 - **Multi-Agent Architecture** - Specialized AI agents for different research tasks
-- **Multi-LLM Support** - Provider routing with a preferred-provider override
+- **Anthropic-Only** - Powered exclusively by Claude (Opus 4.5, Sonnet 4.5, Haiku)
 - **Evidence Tracking** - Evidence cards with URLs, snippets, and IDs stored per run
 - **Quant Metrics** - Pre-computed financial ratios, scores, and red flag detection
 - **Budget Management** - Hard limits on LLM spending per analysis run
@@ -62,10 +62,8 @@ Create a `.env` file with your API keys:
 # Required
 SEC_USER_AGENT="YourName your@email.com"
 
-# LLM Providers (at least one required)
+# LLM Provider (required)
 ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
 
 # Data Sources (recommended)
 FMP_API_KEY=...
@@ -113,8 +111,8 @@ er version
 | 3 | Vertical Analysts | Deep research on each research vertical |
 | 3.5 | Verification | Heuristic verification + fact ledger |
 | 3.75 | Integration | Cross-vertical dynamics map |
-| 4 | Synthesizers | Two independent full reports (Claude + GPT) |
-| 5 | Judge | Editorial review, selects best synthesis |
+| 4 | Synthesizer | Full research report with Claude extended thinking |
+| 5 | Judge | Editorial review and scoring |
 | 6 | Revision | Final polished report with feedback incorporated |
 | 7 | Valuation | DCF / reverse DCF artifacts (best-effort) |
 
@@ -122,7 +120,7 @@ er version
 
 - **FMP (Financial Modeling Prep)** - Financial statements, transcripts, analyst estimates
 - **Yahoo Finance** - Real-time market data and pricing
-- **Web Search** - Provider-specific (OpenAI web_search or Gemini grounding)
+- **Web Search** - Claude Agent SDK web search for competitive intelligence
 
 ### Quant Metrics
 

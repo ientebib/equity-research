@@ -3,6 +3,9 @@ Configuration management using pydantic-settings.
 
 Loads configuration from environment variables and .env files.
 Validates required fields and provides typed access to settings.
+
+This configuration is for Anthropic-only operation using Claude models
+and the Claude Agent SDK.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,7 +23,7 @@ class Settings(BaseSettings):
 
     Required:
         SEC_USER_AGENT: Email identification for SEC EDGAR API (must contain @)
-        At least one of: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
+        ANTHROPIC_API_KEY: Anthropic API key for Claude models
 
     Optional:
         FMP_API_KEY: Financial Modeling Prep API key for transcripts
@@ -45,22 +48,17 @@ class Settings(BaseSettings):
         description="Email identification for SEC EDGAR API (required by SEC)",
     )
 
-    # LLM API Keys - at least one required
-    OPENAI_API_KEY: str | None = Field(default=None, description="OpenAI API key")
-    ANTHROPIC_API_KEY: str | None = Field(default=None, description="Anthropic API key")
-    GEMINI_API_KEY: str | None = Field(default=None, description="Google Gemini API key")
+    # Required - Anthropic API Key
+    ANTHROPIC_API_KEY: str = Field(
+        ...,
+        description="Anthropic API key for Claude models (required)",
+    )
 
     # Optional data provider API keys
     FMP_API_KEY: str | None = Field(
         default=None, description="Financial Modeling Prep API key"
     )
     FINNHUB_API_KEY: str | None = Field(default=None, description="Finnhub API key")
-
-    # Provider preference
-    PREFERRED_PROVIDER: str | None = Field(
-        default=None,
-        description="Preferred LLM provider (openai|anthropic|google) to force all roles",
-    )
 
     # Budget and limits
     MAX_BUDGET_USD: float = Field(
@@ -82,13 +80,13 @@ class Settings(BaseSettings):
         default="INFO", description="Logging level"
     )
 
-    # Model defaults for different roles (2025 models)
+    # Model defaults - all Claude models
     MODEL_WORKHORSE: str = Field(
-        default="gpt-4o-mini",
+        default="claude-3-5-haiku-20241022",
         description="Default model for workhorse tasks (fast, cheap)",
     )
     MODEL_RESEARCH: str = Field(
-        default="gemini-2.5-pro",
+        default="claude-sonnet-4-5-20250929",
         description="Default model for research tasks (balanced)",
     )
     MODEL_JUDGE: str = Field(
@@ -96,8 +94,8 @@ class Settings(BaseSettings):
         description="Default model for judge/deliberation (high quality)",
     )
     MODEL_SYNTHESIS: str = Field(
-        default="claude-sonnet-4-5-20250929",
-        description="Default model for synthesis (high quality)",
+        default="claude-opus-4-5-20251101",
+        description="Default model for synthesis (high quality with extended thinking)",
     )
 
     @property
@@ -121,35 +119,9 @@ class Settings(BaseSettings):
         return self.MODEL_SYNTHESIS
 
     @property
-    def preferred_provider(self) -> str | None:
-        """Get preferred provider (normalized)."""
-        if not self.PREFERRED_PROVIDER:
-            return None
-        value = self.PREFERRED_PROVIDER.strip().lower()
-        if not value:
-            return None
-        if value == "google" and not self.gemini_api_key:
-            return None
-        if value == "openai" and not self.openai_api_key:
-            return None
-        if value == "anthropic" and not self.anthropic_api_key:
-            return None
-        return value
-
-    @property
-    def openai_api_key(self) -> str | None:
-        """Get OpenAI API key (lowercase alias)."""
-        return self.OPENAI_API_KEY
-
-    @property
-    def anthropic_api_key(self) -> str | None:
+    def anthropic_api_key(self) -> str:
         """Get Anthropic API key (lowercase alias)."""
         return self.ANTHROPIC_API_KEY
-
-    @property
-    def gemini_api_key(self) -> str | None:
-        """Get Gemini API key (lowercase alias)."""
-        return self.GEMINI_API_KEY
 
     @field_validator("SEC_USER_AGENT")
     @classmethod
@@ -160,32 +132,6 @@ class Settings(BaseSettings):
                 "SEC_USER_AGENT must contain an email address (SEC requirement)"
             )
         return v
-
-    @model_validator(mode="after")
-    def validate_at_least_one_llm_provider(self) -> Settings:
-        """Ensure at least one LLM provider API key is configured."""
-        if not any([
-            self.OPENAI_API_KEY,
-            self.ANTHROPIC_API_KEY,
-            self.GEMINI_API_KEY,
-        ]):
-            raise ValueError(
-                "At least one LLM provider API key must be configured: "
-                "OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY"
-            )
-        return self
-
-    @property
-    def available_providers(self) -> list[str]:
-        """Return list of configured LLM providers."""
-        providers: list[str] = []
-        if self.OPENAI_API_KEY:
-            providers.append("openai")
-        if self.ANTHROPIC_API_KEY:
-            providers.append("anthropic")
-        if self.GEMINI_API_KEY:
-            providers.append("google")
-        return providers
 
     def ensure_directories(self) -> None:
         """Create cache and output directories if they don't exist."""
@@ -209,9 +155,7 @@ class Settings(BaseSettings):
 
         return {
             "SEC_USER_AGENT": self.SEC_USER_AGENT,
-            "OPENAI_API_KEY": redact("OPENAI_API_KEY", self.OPENAI_API_KEY),
             "ANTHROPIC_API_KEY": redact("ANTHROPIC_API_KEY", self.ANTHROPIC_API_KEY),
-            "GEMINI_API_KEY": redact("GEMINI_API_KEY", self.GEMINI_API_KEY),
             "FMP_API_KEY": redact("FMP_API_KEY", self.FMP_API_KEY),
             "FINNHUB_API_KEY": redact("FINNHUB_API_KEY", self.FINNHUB_API_KEY),
             "MAX_BUDGET_USD": self.MAX_BUDGET_USD,
@@ -224,7 +168,6 @@ class Settings(BaseSettings):
             "MODEL_RESEARCH": self.MODEL_RESEARCH,
             "MODEL_JUDGE": self.MODEL_JUDGE,
             "MODEL_SYNTHESIS": self.MODEL_SYNTHESIS,
-            "PREFERRED_PROVIDER": self.PREFERRED_PROVIDER,
         }
 
 
